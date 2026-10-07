@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# Generated indexes and caches (rebuilt automatically from pdfs/)
+texts/
+metadata/
+bm25_index/
+chroma_storeee/
+db/
+
+# Source judgments (add your own locally)
+pdfs/*
+!pdfs/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

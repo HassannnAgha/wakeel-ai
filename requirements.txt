@@ -1,0 +1,14 @@
+# LangChain is pinned below 1.0 because the agent uses initialize_agent / ConversationBufferMemory
+langchain>=0.3,<1.0
+langchain-community>=0.3,<1.0
+langchain-google-genai>=2.0,<3.0
+chromadb
+sentence-transformers
+transformers
+rank-bm25
+pdfplumber
+numpy
+tqdm
+requests
+yfinance
+python-dotenv
