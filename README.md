@@ -1,4 +1,4 @@
-# Wakeel AI ⚖️
+# Wakeel AI
 
 **Your AI legal research assistant for Pakistani case law.**
 
@@ -64,14 +64,26 @@ The first run downloads the embedding model and indexes every PDF. Later runs on
 
 ## Roadmap
 
-- [ ] Web app with chat interface and a source viewer that highlights cited paragraphs
-- [ ] Clickable citations on every answer, with an "insufficient sources" fallback
-- [ ] Citizen / Student / Lawyer answer modes
-- [ ] Urdu and Roman-Urdu queries, plus voice input
-- [ ] "Explain my document" for FIRs, legal notices and court orders
+Full details are in [PROPOSAL.md](PROPOSAL.md#5-key-features--deliverables).
+
+**Round 2: Screening**
+- [ ] Streamlit web application with a source-paragraph panel, deployed publicly
+- [ ] Answers that cite case, court and paragraph, with a "not found in sources" response
+- [ ] Pre-indexed demonstration corpus
+
+**Round 3: Mentorship**
+- [ ] Citizen, student and lawyer answer modes
+- [ ] Urdu and Roman Urdu support, with speech input
+- [ ] Document explanation for FIRs, legal notices and court orders
+- [ ] Cross-encoder re-ranking and Reciprocal Rank Fusion
+- [ ] Statute linker (Pakistan Code)
+- [ ] Evaluation benchmark (Recall@k, MRR, faithfulness)
+
+**Final Round**
 - [ ] Precedent citation graph
-- [ ] Cross-encoder re-ranking and OCR for scanned judgments
-- [ ] Retrieval evaluation benchmark (Recall@k, MRR, faithfulness)
+- [ ] Case timeline extraction
+- [ ] OCR for scanned judgments
+- [ ] Answer-quality feedback collection
 
 ## Team
 

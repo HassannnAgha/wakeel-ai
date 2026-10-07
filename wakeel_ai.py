@@ -999,7 +999,7 @@ Document to summarize:
         if match:
             return match.group(1), match.group(2).strip()
         payload_match = re.search(r"<answer>(.*?)</answer>", response, re.DOTALL)
-        return None, payload_match.group(1).strip() if payload_match else "❌ Invalid classification response."
+        return None, payload_match.group(1).strip() if payload_match else "Invalid classification response."
 
     def is_legal_query(self, query: str) -> bool:
         try:
@@ -1129,21 +1129,21 @@ if __name__ == "__main__":
     print("AGENT READY - Enhanced with Hybrid RAG Search")
     print("="*60)
     print("\nCapabilities:")
-    print("  ✓ Hybrid search (semantic + keyword)")
-    print("  ✓ Pakistani court judgment analysis")
-    print("  ✓ Case comparison and summarization")
-    print("  ✓ Document indexing and retrieval")
-    print("  ✓ Legal classification and routing")
+    print("  - Hybrid search (semantic + keyword)")
+    print("  - Pakistani court judgment analysis")
+    print("  - Case comparison and summarization")
+    print("  - Document indexing and retrieval")
+    print("  - Legal classification and routing")
     print("\nFeatures:")
-    print("  • Search by case name, number, or citation")
-    print("  • Search by legal provisions (Section 302 PPC)")
-    print("  • Extract judge names, parties, and precedents")
-    print("  • Intelligent chunking for court judgments")
+    print("  - Search by case name, number, or citation")
+    print("  - Search by legal provisions (Section 302 PPC)")
+    print("  - Extract judge names, parties, and precedents")
+    print("  - Intelligent chunking for court judgments")
     print("\nPowered by: Google Gemini 2.5 Flash")
     print("="*60)
     
     # Interactive loop
-    print("\n💬 Chat with Wakeel AI (type 'exit' to quit)\n")
+    print("\nChat with Wakeel AI (type 'exit' to quit)\n")
     
     while True:
         user_input = input("You: ").strip()
@@ -1152,13 +1152,13 @@ if __name__ == "__main__":
             continue
             
         if user_input.lower() in ['exit', 'quit', 'bye']:
-            print("\nGoodbye! 👋")
+            print("\nGoodbye.")
             break
         
         try:
-            print("\n🤖 Agent: ", end="", flush=True)
+            print("\nWakeel AI: ", end="", flush=True)
             response = agent.run(user_input)
             print(response)
             print()
         except Exception as e:
-            print(f"\n❌ Error: {str(e)}\n")
+            print(f"\nError: {str(e)}\n")

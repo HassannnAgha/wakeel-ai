@@ -1,162 +1,195 @@
-# Wakeel AI — Your AI Legal Research Assistant for Pakistani Case Law
+# Wakeel AI: AI Legal Research Assistant for Pakistani Case Law
 
-**Category:** Intelligent App Creation
-**Event:** 4th International AI Championship (AIEF), 2026
-**Team:** Agha Ali Hassan ([@HassannnAgha](https://github.com/HassannnAgha)) · Warda Fatima ([@WardaFatima15](https://github.com/WardaFatima15))
-**University:** FAST-NUCES, Lahore · BS Computer Science, 7th semester
-**Repository:** https://github.com/HassannnAgha/wakeel-ai
-
-> **Keywords:** Legal AI · Retrieval-Augmented Generation (RAG) · Hybrid Search · Pakistani Case Law · Agentic LLM
+| | |
+|---|---|
+| **Competition** | 4th International AI Championship 2026, Artificial Intelligence Education Foundation (AIEF) |
+| **Category** | Intelligent App Creation |
+| **Team** | Agha Ali Hassan (GitHub: HassannnAgha), Warda Fatima (GitHub: WardaFatima15) |
+| **Institution** | FAST-NUCES, Lahore, BS Computer Science, 7th semester |
+| **Repository** | https://github.com/HassannnAgha/wakeel-ai |
+| **Keywords** | Legal AI, Retrieval-Augmented Generation, Hybrid Search, Pakistani Case Law, Agentic LLM |
 
 ---
 
 ## 1. Project Overview & Problem Statement
 
-Pakistan's courts are overloaded. The Law and Justice Commission of Pakistan reported
-**2.36 million pending cases** as of 31 December 2024, with about 83% of them in the
-district judiciary. Part of what keeps cases slow is legal research, which is still
-mostly manual:
+### Overview
 
-- **Lawyers and junior associates** spend hours searching PLD, SCMR, PLJ and High Court
-  judgments for relevant precedents, often with keyword-only search.
-- **Law students** have no affordable tool that explains *why* a court ruled the way it did.
-- **Ordinary citizens** facing an FIR, a property dispute or a bail hearing cannot read a
-  50-page English judgment full of Latin and statutory references, and many cannot pay
-  for a first consultation.
+Wakeel AI is an AI-powered legal research assistant for Pakistani case law. Users ask questions
+in natural language. The system retrieves the relevant court judgments, summarizes them in plain
+language, and compares rulings side by side. It is built on a hybrid retrieval-augmented
+generation (RAG) pipeline that is designed around how Pakistani judgments are structured.
 
-Generic chatbots (ChatGPT, Gemini) don't help much here. They are not grounded in
-Pakistani judgments, they make up citations, and they don't follow how Pakistani
-judgments are laid out (case number → parties → coram → facts → arguments → analysis → order).
+### Problem Statement
+
+According to the Law and Justice Commission of Pakistan, 2,362,135 cases were pending in
+Pakistani courts as of 31 December 2024. About 83% of them were in the district judiciary.
+Legal research is one of the slow, manual steps behind this backlog:
+
+1. **Legal research takes too long.** Lawyers and associates search through PLD, SCMR, PLJ and
+   High Court reports by hand or with keyword search. Finding relevant precedents for a single
+   matter can take hours.
+2. **Judgments are hard for non-lawyers to read.** A litigant dealing with an FIR, a bail hearing
+   or a property dispute cannot easily follow a long English judgment full of technical and
+   statutory language. Many cannot pay for a first consultation just to understand their position.
+3. **General-purpose AI tools are unreliable for this.** General chatbots are not grounded in
+   Pakistani judgments, can make up citations, and do not account for the standard layout of a
+   judgment (case number, parties, coram, facts, arguments, analysis, order).
 
 ## 2. Proposed Solution
 
-**Wakeel AI** is an AI-native legal research assistant built on a **Hybrid RAG + agent**
-architecture designed for Pakistani court judgments.
+Wakeel AI combines a domain-specific document pipeline with an LLM agent:
+
+1. **Judgment-aware ingestion.** Judgments are split by their numbered paragraphs, not cut into
+   fixed-size pieces. Each chunk is labelled as header, facts, arguments, analysis or conclusion.
+   The pipeline extracts the court, case number, parties, judges, hearing date, case citations
+   (SCMR, PLD, PLJ, AIR) and statutory provisions (PPC, CrPC, CPC, Constitution).
+2. **Hybrid retrieval.** Dense semantic search (BAAI/bge-large-en-v1.5 embeddings in ChromaDB)
+   is combined with BM25 keyword search. The keyword side matches exact citations and section
+   numbers, which semantic search alone often misses.
+3. **Agentic reasoning.** Each query is first classified as a general query, a summarization
+   request or a comparison request. A LangChain agent running on Google Gemini 2.5 Flash then
+   chooses the right tool and keeps conversation memory, so follow-up questions work.
+
+### System Architecture
 
 ```
- PDF judgments ──► Text extraction ──► Judgment-aware chunker ──► Metadata extraction
-                                         (paragraph / section)     (court, case no., parties,
-                                                                    judges, citations, PPC/CrPC
-                                                                    sections, hearing date)
-                                                    │
-                          ┌─────────────────────────┴──────────────────────────┐
-                          ▼                                                    ▼
-              Dense index (ChromaDB +                                Sparse index (BM25)
-              BAAI/bge-large-en-v1.5)                                keyword / citation match
-                          └──────────────► Hybrid ranker ◄─────────────────────┘
-                                                │
- User query ──► Intent classifier (GQ/SQ/CQ) ──► LangChain agent (Gemini 2.5 Flash)
-                                                ├─ HybridRAGSearch
-                                                ├─ Summarizer (layman language)
-                                                ├─ CompareCases (similarities / differences)
-                                                └─ IndexNewDocuments
+PDF judgments -> Text extraction -> Judgment-aware chunker -> Metadata and citation extraction
+                                              |
+                     +------------------------+------------------------+
+                     v                                                 v
+        Dense index (ChromaDB, bge-large)                 Sparse index (BM25)
+                     +-----------------> Hybrid ranker <---------------+
+                                              |
+User query -> Intent classifier -> LangChain agent (Gemini 2.5 Flash)
+                                     - Hybrid search tool
+                                     - Summarization tool
+                                     - Case comparison tool
+                                     - Document indexing tool
 ```
-
-**What is already built (working prototype):**
-
-| Component | Status |
-|---|---|
-| PDF text extraction with on-disk caching | ✅ |
-| **Pakistani-judgment-aware chunker**: splits on numbered paragraphs, labels each chunk as header / facts / arguments / analysis / conclusion | ✅ |
-| Metadata extraction: court, case number, parties, judges, hearing date | ✅ |
-| Citation extraction (SCMR, PLD, PLJ, AIR, "X v. Y") and statute extraction (Sections of PPC/CrPC/CPC, Constitutional Articles) | ✅ |
-| Contextual chunk enrichment (case header + previous-paragraph context prepended before embedding) | ✅ |
-| Hybrid retrieval: semantic (ChromaDB, cosine) + BM25, weighted fusion | ✅ |
-| Incremental indexing (only new PDFs are processed) | ✅ |
-| Query classifier: General / Summarize / Compare, with follow-up resolution via chat memory | ✅ |
-| Off-topic refusal guardrail | ✅ |
-| Case comparison and plain-language summarization tools | ✅ |
 
 ## 3. Objectives & Expected Outcomes
 
-**Objectives**
-1. Cut the time to find relevant precedents from hours to minutes.
-2. Return **grounded answers only**: every claim links back to the exact judgment and paragraph.
-3. Make judgments readable for non-lawyers in plain English and Urdu.
-4. Show that a domain-specific chunking and retrieval pipeline beats generic RAG on Pakistani legal text.
+### Objectives
 
-**Measurable outcomes (target by finale)**
-| Metric | Target |
+1. Cut the time needed to find relevant precedents from hours to minutes.
+2. Ground every answer in source material, with traceable references to the judgment and paragraph.
+3. Make judgments understandable to non-lawyers in English and Urdu.
+4. Show that domain-specific chunking and hybrid retrieval beat generic RAG on Pakistani legal text.
+
+### Expected Outcomes
+
+| Metric | Target by Final Round |
 |---|---|
-| Retrieval Recall@10 on a hand-labelled test set of 50 legal queries | ≥ 0.85 |
-| Answers with a valid, verifiable citation | ≥ 95% |
-| Hybrid vs. dense-only retrieval improvement (MRR) | measurable gain, reported |
-| Median response time | < 8 s |
-| Indexed corpus | 500+ SC / LHC / SHC / IHC judgments |
+| Retrieval Recall@10 on a labelled set of 50 legal queries | 0.85 or higher |
+| Answers containing a verifiable source citation | 95% or higher |
+| Hybrid vs. dense-only retrieval (Mean Reciprocal Rank) | Measured and reported |
+| Median end-to-end response time | Under 8 seconds |
+| Indexed corpus | 500+ Supreme Court and High Court judgments |
 
 ## 4. Target Users
 
-| User | Need | How Wakeel AI helps |
+| User Group | Need | How Wakeel AI Helps |
 |---|---|---|
-| Practising lawyers & associates | Fast precedent search, citation lookup | Search by citation, section ("302 PPC"), judge or facts; compare two rulings |
-| Law students | Understand reasoning, exam/moot prep | Section-tagged summaries (facts → arguments → analysis → verdict) |
-| Citizens & litigants | Understand their situation and a judgment | Plain-language and Urdu explanations, with a clear "not legal advice" notice |
-| Legal-aid NGOs & paralegals | Handle many cases with few lawyers | Quick triage of relevant law and similar past cases |
-| Journalists & researchers | Track judicial trends | Search across courts, judges and provisions |
+| Practising lawyers and associates | Fast precedent and citation research | Search by citation, statutory section, judge, party or facts. Compare rulings. |
+| Law students | Understanding judicial reasoning; exam and moot court preparation | Summaries organized by facts, arguments, analysis and verdict |
+| Citizens and litigants | Understanding their legal situation | Plain-language explanations in English and Urdu |
+| Legal aid organizations and paralegals | Handling high caseloads with limited staff | Quick identification of relevant law and similar past cases |
+| Researchers and journalists | Tracking judicial trends | Search across courts, judges and provisions |
 
 ## 5. Key Features / Deliverables
 
-**Core (prototype, already working)**
-- Hybrid semantic + keyword search over Pakistani judgments
-- Judgment-structure-aware chunking and metadata extraction
-- Agentic routing: search, summarize, compare, index
-- Follow-up-aware conversational memory
+### Implemented in the Prototype
 
-**Planned for the MVP / finale**
-1. **Web application** (Streamlit → React): chat interface, source panel, and a PDF viewer that highlights the cited paragraph.
-2. **Grounded answers with clickable citations**: every answer cites `[Case No., Court, Para N]`. If no supporting source is found, the assistant says so instead of guessing.
-3. **Adaptive user modes** (the "intelligent UX" part): *Citizen*, *Student* and *Lawyer* modes change vocabulary, depth and output format for the same query.
-4. **Urdu & Roman-Urdu support**: ask in Urdu or Roman Urdu and get answers in the same language. Voice input with Whisper for users who prefer speaking.
-5. **"Explain my document"**: upload an FIR, legal notice or court order. Wakeel AI explains it in plain language, picks out the provisions involved, and finds similar past cases.
-6. **Precedent / citation graph**: an interactive graph of which judgments cite which, built from citations the pipeline already extracts.
-7. **Statute linker**: when "Section 497 CrPC" or "Article 10-A" appears, show the actual text of the provision inline.
-8. **Re-ranking with a cross-encoder** (`bge-reranker`) and **Reciprocal Rank Fusion**, to improve retrieval precision.
-9. **OCR pipeline** (Tesseract/EasyOCR) for scanned judgments, which are common in Pakistani court archives.
-10. **Evaluation dashboard**: Recall@k, MRR and faithfulness scores on a labelled benchmark, so the claims above can be checked.
+1. PDF text extraction with on-disk caching
+2. Judgment-aware chunking based on numbered paragraphs and section types
+3. Metadata extraction: court, case number, parties, judges, hearing date
+4. Extraction of case citations and statutory provisions
+5. Contextual chunk enrichment (case header and previous-paragraph context are added before embedding)
+6. Hybrid semantic and BM25 retrieval with weighted score fusion
+7. Incremental indexing that processes only new documents
+8. Query classification (general, summarize, compare) with follow-up resolution from chat memory
+9. Refusal of off-topic queries
+10. Plain-language summarization and structured case comparison
+
+### Planned Deliverables
+
+**Round 2: Screening (by October 16)**
+1. Web application (Streamlit) with a chat interface and a panel showing source paragraphs, deployed publicly
+2. Answers that cite case number, court and paragraph, with a "not found in sources" response instead of guessing
+3. A pre-indexed demonstration corpus of real judgments
+4. Fixes to how documents are looked up for comparison and how classified queries are routed
+
+**Round 3: Mentorship (by October 23)**
+1. Adaptive answer modes for citizens, students and lawyers, which change vocabulary, depth and output format
+2. Urdu and Roman Urdu input and output, with speech input using Whisper
+3. Document explanation: users upload an FIR, legal notice or court order and get a plain-language explanation and the provisions involved
+4. Cross-encoder re-ranking and Reciprocal Rank Fusion for better retrieval precision
+5. A statute linker that shows the text of a cited provision from Pakistan Code
+6. An evaluation benchmark reporting Recall@k, MRR and answer faithfulness
+
+**Final Round (October 24)**
+1. An interactive precedent graph showing which judgments cite which
+2. Case timeline extraction (FIR, arrest, trial, appeal)
+3. Aggregate statistics by provision, court and year, presented as statistics and not as predictions for individual cases
+4. OCR support for scanned judgments
+5. User feedback collection on answer quality
+6. A WhatsApp interface, as a stretch goal, for citizens who do not use web applications
 
 ## 6. Implementation Plan & Timeline
 
-| Dates (2026) | Milestone | Deliverables |
+| Period (2026) | Phase | Activities |
 |---|---|---|
-| Done | Core engine | Chunker, metadata extraction, hybrid RAG, agent, CLI |
-| Oct 7 – Oct 12 | **Idea + prototype submission** | Code cleanup, `.env` config, Streamlit UI, grounded citations, this proposal |
-| Oct 12 – Oct 16 | Screening | Expand corpus to 500+ judgments, build the 50-query evaluation set |
-| Oct 16 – Oct 20 | MVP hardening (after shortlist) | Re-ranker, user modes, Urdu support, "Explain my document" |
-| Oct 20 – Oct 23 | Mentorship & polish | Citation graph, evaluation dashboard, apply mentor feedback, demo script |
-| **Oct 24** | **Final live pitch** at FAST-NUCES, Lahore | Live demo + metrics |
+| Completed | Core engine | Ingestion pipeline, metadata extraction, hybrid retrieval, agent, command-line interface |
+| October 7 to 12 | Idea and prototype submission | Code cleanup, configuration management, proposal and repository |
+| October 12 to 16 | Screening | Web application, grounded citations, demonstration corpus, public deployment |
+| October 16 to 20 | MVP development | Adaptive modes, Urdu support, document explanation, re-ranking |
+| October 20 to 23 | Mentorship and refinement | Evaluation benchmark, statute linker, precedent graph, changes from mentor feedback |
+| October 24 | Final championship | Live demonstration and presentation at FAST-NUCES, Lahore |
 
-**Tech stack:** Python · LangChain · Google Gemini 2.5 Flash · ChromaDB · BM25 (`rank_bm25`) ·
-Sentence-Transformers (`BAAI/bge-large-en-v1.5`) · pdfplumber · Streamlit / React · Whisper (planned)
+### Technology Stack
 
-## 7. Resources / Requirements
+| Layer | Technology |
+|---|---|
+| Language model | Google Gemini 2.5 Flash |
+| Orchestration | LangChain |
+| Embeddings | Sentence-Transformers (BAAI/bge-large-en-v1.5) |
+| Vector store | ChromaDB |
+| Keyword retrieval | BM25 (rank_bm25) |
+| Document processing | pdfplumber, Tesseract OCR (planned) |
+| Speech | Whisper (planned) |
+| Interface | Streamlit (planned) |
 
-- **Data:** publicly available judgments from the Supreme Court of Pakistan and the High Court
-  websites (Lahore, Sindh, Islamabad, Peshawar, Balochistan), plus Pakistan Code (pakistancode.gov.pk) for statute text.
-- **Compute:** one GPU (or Colab/Kaggle) for bulk embedding. Inference runs on a CPU server.
-- **APIs:** Google Gemini API (free tier covers prototype usage).
-- **Expertise:** a legal mentor or law faculty member to validate outputs and help label the evaluation set.
-- **Hosting:** Hugging Face Spaces / Render for the public demo.
+## 7. Resources or Requirements
 
-## 8. Potential Challenges & Risks
+1. **Data:** publicly available judgments from the Supreme Court of Pakistan and the Lahore, Sindh,
+   Islamabad, Peshawar and Balochistan High Courts. Statute text from Pakistan Code (pakistancode.gov.pk).
+2. **Compute:** GPU access (local or cloud notebook) for bulk embedding. Inference runs on a CPU server.
+3. **API access:** Google Gemini API.
+4. **Hosting:** Hugging Face Spaces or an equivalent platform for the public demonstration.
+5. **Domain expertise:** guidance from a legal practitioner or law faculty member to check outputs
+   and help label the evaluation dataset.
+
+## 8. Potential Challenges or Risks
 
 | Risk | Mitigation |
 |---|---|
-| **Hallucinated citations or wrong legal information** | Strict grounding (answer only from retrieved text), citation verification against the index, "insufficient sources" fallback, a visible "not legal advice" disclaimer |
-| Scanned / poorly formatted PDFs | OCR fallback; regex patterns tuned on real judgments; basic chunker as a fallback |
-| Inconsistent judgment formats across courts | Per-court header patterns, with fallback to generic chunking |
-| Urdu legal terminology | Bilingual glossary of common legal terms; human review of sample outputs |
-| Privacy of user-uploaded documents | Uploads processed in-session, not added to the shared index, deleted after the session |
-| LLM API cost / rate limits | Caching, a small model for classification, and a local LLM option (e.g. Llama/Qwen via Ollama) |
-| Over-reliance by citizens | Mode-specific disclaimers and links to free legal-aid services |
+| Incorrect or fabricated legal information | Answers come only from retrieved text, citations are checked against the index, the system says when sources are insufficient, and a disclaimer is always shown |
+| Scanned or poorly formatted PDFs | OCR fallback; extraction patterns tuned on real judgments; generic chunking as a fallback |
+| Different judgment formats across courts | Court-specific header patterns, with fallback to generic chunking |
+| Accuracy of Urdu legal terminology | A curated bilingual glossary of legal terms; manual review of sample outputs |
+| Privacy of user-uploaded documents | Uploads are processed only within the session and are not added to the shared index |
+| API cost and rate limits | Response caching, a lighter model for classification, and an option to run an open-source model locally |
+| Over-reliance by non-expert users | Disclaimers in each answer mode and links to free legal aid services |
 
 ## 9. Additional Details
 
-- **Why this fits Intelligent App Creation:** the app adapts to the user. It classifies intent,
-  remembers conversation context, changes tone and depth for citizens, students and lawyers,
-  and picks its own tools (search / summarize / compare) instead of following a fixed flow.
-- **Social impact:** better access to justice. A citizen who understands their FIR or a past
-  bail judgment is better placed to deal with lawyers and courts.
-- **Scalability:** the same pipeline can be extended to tax tribunals, FBR rulings, SECP
-  regulations and labour courts by adding citation and section patterns.
-- **Ethics:** Wakeel AI is a research and understanding aid, **not a substitute for a lawyer**. It does
-  not predict individual case outcomes and is clear about where its sources come from.
+1. **Fit with the category:** the application changes its behaviour based on what the user needs.
+   It classifies intent, keeps track of the conversation, adjusts its answers to the type of user,
+   and chooses its own tools for each request.
+2. **Social impact:** helping citizens understand their legal position supports access to justice
+   and makes them better prepared to work with lawyers and the courts.
+3. **Scalability:** the same pipeline can be extended to tax tribunals, FBR rulings, SECP regulations
+   and labour courts by adding domain-specific citation and provision patterns.
+4. **Ethical position:** Wakeel AI is a research and educational tool. It does not provide legal
+   advice, does not predict outcomes for individual cases, and always shows the sources behind its answers.
