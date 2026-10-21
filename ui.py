@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import wakeel_ai as W
 
-PAGE = """<!doctype html>
+PAGE = r"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -84,6 +84,46 @@ PAGE = """<!doctype html>
   .send { padding: 0 18px; }
   .dots::after { content: ''; animation: d 1.2s steps(4,end) infinite; }
   @keyframes d { 0%{content:''} 25%{content:'.'} 50%{content:'..'} 75%{content:'...'} }
+
+  /* citations and source panel */
+  .cite {
+    font: inherit; font-size: 11px; font-weight: 650; vertical-align: super;
+    margin: 0 1px; padding: 0 5px; cursor: pointer; line-height: 1.5;
+    color: var(--accent); background: transparent;
+    border: 1px solid var(--accent); border-radius: 5px;
+  }
+  .cite:hover { background: var(--accent); color: var(--bg); }
+  .sources { margin-top: 8px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+  .chip {
+    font: inherit; font-size: 12px; padding: 4px 9px; cursor: pointer; text-align: left;
+    background: var(--bot-bg); color: var(--fg);
+    border: 1px solid var(--line); border-radius: 999px;
+  }
+  .chip:hover { border-color: var(--accent); }
+  .chip b { color: var(--accent); margin-right: 3px; }
+  .nf { color: var(--err); font-style: normal; }
+
+  #panel {
+    position: fixed; top: 0; right: 0; bottom: 0; width: min(430px, 92vw);
+    background: var(--bg); border-left: 1px solid var(--line);
+    overflow-y: auto; padding: 16px; z-index: 20;
+    transform: translateX(100%); transition: transform .18s ease;
+  }
+  body.panel-open #panel { transform: translateX(0); box-shadow: -8px 0 24px rgba(0,0,0,.18); }
+  .phead { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  #pclose { font-size: 20px; line-height: 1; padding: 2px 9px; }
+  .pmeta { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 14px; }
+  .pmeta th {
+    text-align: left; font-weight: 500; color: var(--muted);
+    width: 34%; padding: 4px 8px 4px 0; vertical-align: top;
+  }
+  .pmeta td { padding: 4px 0; vertical-align: top; word-break: break-word; }
+  .pexcerpt {
+    white-space: pre-wrap; font-size: 14px; line-height: 1.65;
+    padding: 12px; border-radius: 8px;
+    background: var(--bot-bg); border: 1px solid var(--line);
+  }
 </style>
 </head>
 <body>
@@ -101,6 +141,8 @@ PAGE = """<!doctype html>
   <code>Summarize the Lahore High Court judgment on maintenance</code>
   <code>Compare the 2023 writ petition with the criminal appeal</code>
 </div></div></div>
+
+<aside id="panel" aria-label="Source paragraph"></aside>
 
 <footer>
   <form id="form">
@@ -139,6 +181,98 @@ function add(role, text, tag, isError) {
   return b;
 }
 
+// ---- sources -------------------------------------------------------------
+let lastSources = [];
+
+function sourceLabel(s) {
+  const bits = [];
+  if (s.case_no) bits.push(s.case_no);
+  else if (s.doc_id) bits.push(s.doc_id);
+  if (s.paragraph) bits.push('¶' + s.paragraph);
+  return bits.join(' ') || ('Source ' + s.n);
+}
+
+// Turn [S1] markers in the answer into clickable chips.
+function renderAnswer(bubble, text, sources) {
+  bubble.textContent = '';
+  const byN = {};
+  sources.forEach(s => { byN[s.n] = s; });
+  const parts = text.split(/(\[S\d+\])/g);
+  parts.forEach(part => {
+    const m = part.match(/^\[S(\d+)\]$/);
+    if (m && byN[m[1]]) {
+      const s = byN[m[1]];
+      const chip = document.createElement('button');
+      chip.className = 'cite';
+      chip.textContent = 'S' + s.n;
+      chip.title = sourceLabel(s);
+      chip.addEventListener('click', () => openSource(s));
+      bubble.appendChild(chip);
+    } else if (part) {
+      bubble.appendChild(document.createTextNode(part));
+    }
+  });
+}
+
+function renderSourceList(msg, sources) {
+  if (!sources || !sources.length) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'sources';
+  const head = document.createElement('div');
+  head.className = 'tag';
+  head.textContent = sources.length + ' source' + (sources.length > 1 ? 's' : '');
+  wrap.appendChild(head);
+  const row = document.createElement('div');
+  row.className = 'chips';
+  sources.forEach(s => {
+    const b = document.createElement('button');
+    b.className = 'chip';
+    b.innerHTML = '<b>S' + s.n + '</b> ' + escapeHtml(sourceLabel(s));
+    b.addEventListener('click', () => openSource(s));
+    row.appendChild(b);
+  });
+  wrap.appendChild(row);
+  msg.appendChild(wrap);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"]/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+function openSource(s) {
+  const panel = document.getElementById('panel');
+  const parties = s.parties && s.parties.appellant
+    ? s.parties.appellant + ' v. ' + (s.parties.respondent || '') : '';
+  const meta = [
+    ['Document', s.doc_id],
+    ['Case number', s.case_no],
+    ['Court', s.court],
+    ['Parties', parties || s.title],
+    ['Paragraph', s.paragraph],
+    ['Section', s.section_type],
+    ['Judges', (s.judges || []).join(', ')],
+    ['Citations', (s.citations || []).join('; ')],
+    ['Provisions', (s.provisions || []).join('; ')],
+    ['Relevance', s.score],
+  ].filter(r => r[1] !== '' && r[1] !== undefined && r[1] !== null);
+
+  panel.innerHTML =
+    '<div class="phead"><b>Source S' + s.n + '</b>' +
+    '<button id="pclose" title="Close">×</button></div>' +
+    '<table class="pmeta">' +
+    meta.map(r => '<tr><th>' + escapeHtml(r[0]) + '</th><td>' +
+                  escapeHtml(r[1]) + '</td></tr>').join('') +
+    '</table><div class="pexcerpt"></div>';
+  panel.querySelector('.pexcerpt').textContent = s.excerpt || '(no text)';
+  panel.querySelector('#pclose').addEventListener('click', closePanel);
+  document.body.classList.add('panel-open');
+}
+
+function closePanel() {
+  document.body.classList.remove('panel-open');
+}
+
 async function ask(text) {
   if (busy || !text.trim()) return;
   busy = true; send.disabled = true;
@@ -153,7 +287,18 @@ async function ask(text) {
     const data = await r.json();
     pending.closest('.msg').remove();
     const label = ROUTES[data.route] || data.route || '';
-    add('bot', data.answer, label ? 'routed to <b>' + label + '</b>' : '', data.route === 'ERROR');
+    const sources = data.sources || [];
+    lastSources = sources;
+
+    let tag = label ? 'routed to <b>' + label + '</b>' : '';
+    if (sources.length && data.grounded === false) {
+      tag += (tag ? ' &middot; ' : '') + '<i class="nf">not in corpus</i>';
+    }
+    const bubble = add('bot', data.answer, tag, data.route === 'ERROR');
+    if (sources.length) {
+      renderAnswer(bubble, data.answer, sources);
+      renderSourceList(bubble.closest('.msg'), sources);
+    }
   } catch (e) {
     pending.closest('.msg').remove();
     add('bot', 'Could not reach the server: ' + e.message, '', true);
@@ -180,8 +325,13 @@ document.addEventListener('click', e => {
   if (e.target.tagName === 'CODE' && e.target.closest('.empty')) ask(e.target.textContent);
 });
 
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') closePanel();
+});
+
 document.getElementById('reset').addEventListener('click', () => {
   thread = crypto.randomUUID ? crypto.randomUUID() : String(Math.random());
+  closePanel();
   inner.innerHTML = '';
   add('bot', 'Started a new conversation. Earlier turns are no longer in context.');
 });

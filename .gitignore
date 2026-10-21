@@ -19,3 +19,6 @@ __pycache__/
 venv/
 .pytest_cache/
 .vscode/
+
+# Internal planning doc (not for the public repo)
+FINAL_PLAN.md

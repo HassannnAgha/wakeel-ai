@@ -693,7 +693,16 @@ def search_hybrid(query: str, top_k=TOP_K_CHUNKS, alpha=HYBRID_ALPHA):
                         "meta": {
                             "doc_id": chunk_data["doc_id"],
                             "case_no": chunk_data["case_no"],
-                            "title": chunk_data["title"]
+                            "title": chunk_data["title"],
+                            # Carry the rest too, otherwise a keyword-only hit
+                            # reaches the UI with no paragraph to cite.
+                            "court": chunk_data.get("court", ""),
+                            "judges": chunk_data.get("judges", []),
+                            "parties": chunk_data.get("parties", {}),
+                            "paragraph_number": chunk_data.get("paragraph_number", ""),
+                            "section_type": chunk_data.get("section_type", ""),
+                            "citations": chunk_data.get("citations", []),
+                            "provisions": chunk_data.get("provisions", []),
                         }
                     }
     
@@ -779,7 +788,7 @@ def format_search_results(results: List[Dict]) -> str:
 
     for i, hit in enumerate(results, 1):
         formatted_output.append(f"\n{'='*60}")
-        formatted_output.append(f"Result #{i} (Relevance: {hit['score']:.3f})")
+        formatted_output.append(f"Source {i}  [S{i}]   (Relevance: {hit['score']:.3f})")
         formatted_output.append(f"{'='*60}")
 
         meta = hit["meta"]
@@ -832,6 +841,58 @@ def format_search_results(results: List[Dict]) -> str:
         formatted_output.append("")
 
     return "\n".join(formatted_output)
+
+
+#: Leading "[Case: ...] [Paragraph 7] [Previous: ...]" context the chunker prepends
+#: before embedding. Useful to the retriever, noise to a human reader.
+_CONTEXT_PREFIX_RE = re.compile(r'^\s*(?:\[[^\]]*\]\s*)+', re.S)
+
+
+def clean_excerpt(text: str) -> str:
+    """Strip the embedding-time context prefix so the panel shows the judgment text."""
+    return _CONTEXT_PREFIX_RE.sub("", text or "").strip()
+
+
+def _as_list(value, default):
+    """Chroma stores lists as JSON strings; return a real list either way."""
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else default
+        except ValueError:
+            return default
+    return default
+
+
+def source_records(hits: List[Dict]) -> List[Dict]:
+    """Turn hybrid-search hits into records the UI can render and link to."""
+    records = []
+    for i, hit in enumerate(hits, 1):
+        meta = hit.get("meta", {}) or {}
+        parties = meta.get("parties", "{}")
+        if isinstance(parties, str):
+            try:
+                parties = json.loads(parties)
+            except ValueError:
+                parties = {}
+        records.append({
+            "n": i,
+            "doc_id": meta.get("doc_id", ""),
+            "case_no": meta.get("case_no", ""),
+            "court": meta.get("court", "").replace("\n", " ").strip(),
+            "title": meta.get("title", ""),
+            "paragraph": str(meta.get("paragraph_number", "") or ""),
+            "section_type": meta.get("section_type", ""),
+            "judges": _as_list(meta.get("judges"), []),
+            "citations": [c.replace("\n", " ") for c in _as_list(meta.get("citations"), [])][:5],
+            "provisions": [p.replace("\n", " ") for p in _as_list(meta.get("provisions"), [])][:5],
+            "parties": parties if isinstance(parties, dict) else {},
+            "score": round(float(hit.get("score", 0.0)), 3),
+            "excerpt": clean_excerpt(hit.get("doc", "")),
+        })
+    return records
 
 
 def hybrid_rag_search(query: str, top_k: int = TOP_K_CHUNKS, alpha: float = HYBRID_ALPHA) -> str:
@@ -965,6 +1026,10 @@ Input Query:
 {query}"""
 )
 
+#: Exact wording the model must use when the corpus cannot answer. Kept as a constant
+#: so the UI and evaluation can detect an honest refusal rather than guess at it.
+NOT_FOUND_PHRASE = "Not found in the indexed judgments"
+
 ANSWER_PROMPT = PromptTemplate.from_template(
     """
 You are a Legal AI assistant specializing in Pakistani case law. Answer the user's question using
@@ -972,8 +1037,12 @@ only the retrieved excerpts below.
 
 Instructions:
 - Ground every statement in the excerpts. Do not invent cases, citations, judges or provisions.
-- Cite the case number, court and paragraph number when you rely on an excerpt.
-- If the excerpts do not answer the question, say so plainly and suggest how to narrow the search.
+- Cite the excerpt you rely on as [S<n>], using the Source number shown against it, for example
+  [S1] or [S3]. Cite after the sentence it supports. Add the court and paragraph number in
+  words where it reads naturally.
+- If the excerpts do not answer the question, reply with exactly this sentence and nothing else:
+  "Not found in the indexed judgments." Then suggest, on a new line, how to narrow the search.
+  Never fill the gap with outside knowledge.
 - Write for a reader who is not a lawyer, but keep the legal meaning exact.
 
 Question:
@@ -1079,6 +1148,7 @@ class WakeelState(TypedDict):
     context: str
     doc1: str
     doc2: str
+    sources: List[Dict]
     answer: str
 
 
@@ -1292,7 +1362,12 @@ Output Instructions:
     def retrieve_node(self, state: WakeelState) -> Dict:
         query = state.get("restated_query") or state["query"]
         _trace(f"retrieving for: {query}")
-        return {"context": hybrid_rag_search(query)}
+        try:
+            hits = search_hybrid(query, top_k=TOP_K_CHUNKS, alpha=HYBRID_ALPHA)
+        except Exception as e:
+            return {"context": f"Error performing RAG search: {e}", "sources": []}
+        _trace(f"retrieved {len(hits)} chunks")
+        return {"context": format_search_results(hits), "sources": source_records(hits)}
 
     def retrieve_pair_node(self, state: WakeelState) -> Dict:
         """Retrieve both sides of a comparison."""
@@ -1305,15 +1380,17 @@ Output Instructions:
             docs_a = search_hybrid(side_a, top_k=3)
             docs_b = search_hybrid(side_b, top_k=3)
         except Exception as e:
-            return {"context": f"Error retrieving documents for comparison: {str(e)}"}
+            return {"context": f"Error retrieving documents for comparison: {str(e)}",
+                    "sources": []}
 
         if not docs_a or not docs_b:
-            return {"context": ""}
+            return {"context": "", "sources": []}
 
         return {
             "context": "ok",
             "doc1": format_search_results(docs_a),
             "doc2": format_search_results(docs_b),
+            "sources": source_records(docs_a + docs_b),
         }
 
     def answer_node(self, state: WakeelState) -> Dict:
@@ -1421,18 +1498,23 @@ Output Instructions:
                     "context": "",
                     "doc1": "",
                     "doc2": "",
+                    "sources": [],
                     "answer": "",
                 },
                 config=config,
             )
+            answer = final_state.get("answer", "") or "No answer produced."
+            sources = final_state.get("sources") or []
             return {
-                "answer": final_state.get("answer", "") or "No answer produced.",
+                "answer": answer,
                 "route": final_state.get("route", "") or "UNKNOWN",
                 "restated_query": final_state.get("restated_query", ""),
+                "sources": sources,
+                "grounded": bool(sources) and NOT_FOUND_PHRASE.lower() not in answer.lower(),
             }
         except Exception as e:
             return {"answer": f"Error processing query: {str(e)}", "route": "ERROR",
-                    "restated_query": ""}
+                    "restated_query": "", "sources": [], "grounded": False}
 
 
 # =====================================================
