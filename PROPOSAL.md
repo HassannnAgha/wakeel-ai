@@ -38,7 +38,7 @@ Legal research is one of the slow, manual steps behind this backlog:
 
 ## 2. Proposed Solution
 
-Wakeel AI combines a domain-specific document pipeline with an LLM agent:
+Wakeel AI combines a domain-specific document pipeline with a graph-structured LLM agent:
 
 1. **Judgment-aware ingestion.** Judgments are split by their numbered paragraphs, not cut into
    fixed-size pieces. Each chunk is labelled as header, facts, arguments, analysis or conclusion.
@@ -48,7 +48,7 @@ Wakeel AI combines a domain-specific document pipeline with an LLM agent:
    is combined with BM25 keyword search. The keyword side matches exact citations and section
    numbers, which semantic search alone often misses.
 3. **Agentic reasoning.** Each query is first classified as a general query, a summarization
-   request or a comparison request. A LangChain agent running on Google Gemini 2.5 Flash then
+   request or a comparison request. A LangGraph state machine running on Google Gemini 3.5 Flash then
    chooses the right tool and keeps conversation memory, so follow-up questions work.
 
 ### System Architecture
@@ -61,11 +61,12 @@ PDF judgments -> Text extraction -> Judgment-aware chunker -> Metadata and citat
         Dense index (ChromaDB, bge-large)                 Sparse index (BM25)
                      +-----------------> Hybrid ranker <---------------+
                                               |
-User query -> Intent classifier -> LangChain agent (Gemini 2.5 Flash)
-                                     - Hybrid search tool
-                                     - Summarization tool
-                                     - Case comparison tool
-                                     - Document indexing tool
+User query -> LangGraph state machine (Gemini 3.5 Flash)
+
+    START -> classify -+- REJECT -> clarify                -> END
+                       +- GQ     -> retrieve -> answer     -> END
+                       +- SQ     -> retrieve -> summarize  -> END
+                       +- CQ     -> retrieve_pair -> compare -> END
 ```
 
 ## 3. Objectives & Expected Outcomes
@@ -151,8 +152,8 @@ User query -> Intent classifier -> LangChain agent (Gemini 2.5 Flash)
 
 | Layer | Technology |
 |---|---|
-| Language model | Google Gemini 2.5 Flash |
-| Orchestration | LangChain |
+| Language model | Google Gemini 3.5 Flash |
+| Orchestration | LangGraph |
 | Embeddings | Sentence-Transformers (BAAI/bge-large-en-v1.5) |
 | Vector store | ChromaDB |
 | Keyword retrieval | BM25 (rank_bm25) |

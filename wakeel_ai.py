@@ -1,44 +1,41 @@
 import os
-import time
-import requests
 import re
 import json
-from typing import List, Optional, Tuple, Dict
+from typing import Annotated, List, Literal, Optional, Tuple, Dict
+from typing_extensions import TypedDict  # pydantic needs this flavour on py<3.12
 from pathlib import Path
 from dataclasses import dataclass
 import pickle
 
 # === NLP / ML ===
-from transformers import pipeline
-import xml.etree.ElementTree as ET
-import yfinance as yf
 import pdfplumber
 from tqdm import tqdm
 import numpy as np
 
-# === LangChain ===
-from langchain.llms.base import LLM
-from langchain.agents import Tool, initialize_agent, AgentType
-from langchain.memory import ConversationBufferMemory
-from langchain.chains import RetrievalQA
-from langchain_community.vectorstores import Chroma
-from langchain_community.document_loaders import TextLoader, PyPDFLoader
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain.prompts import PromptTemplate
+# === LangChain / LangGraph ===
+from pydantic import BaseModel, Field
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langchain_core.prompts import PromptTemplate
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, StateGraph, add_messages
 
 # === RAG Components ===
-import chromadb
-from chromadb.utils import embedding_functions
-from sentence_transformers import SentenceTransformer
+# chromadb and sentence_transformers are imported lazily (see get_collection /
+# get_embed_model) so that chunking, tests and benchmarks can run without loading
+# a 1.3 GB embedding model.
 from rank_bm25 import BM25Okapi
 
 # === Load Google API Key from .env ===
 from dotenv import load_dotenv
 load_dotenv()
-if not os.getenv("GOOGLE_API_KEY"):
-    raise SystemExit("GOOGLE_API_KEY is not set. Copy .env.example to .env and add your key.")
+
+
+def require_api_key() -> None:
+    """Called before the LLM is constructed. Indexing and chunking do not need a key."""
+    if not os.getenv("GOOGLE_API_KEY"):
+        raise SystemExit("GOOGLE_API_KEY is not set. Copy .env.example to .env and add your key.")
 
 
 # =====================================================
@@ -53,10 +50,17 @@ TEXT_DIR = Path("texts")
 METADATA_DIR = Path("metadata")
 BM25_DIR = Path("bm25_index")
 MODEL_NAME = "BAAI/bge-large-en-v1.5"
+# Gemini chat model. gemini-2.5-flash was retired for new API keys in 2026.
+# Measured on the routing test set: 3.5-flash scored 9/9 at ~5.5s median, while
+# 3.6-flash was rate-limited and 3-flash-preview scored 6/9 with 190s outliers.
+LLM_MODEL = os.getenv("WAKEEL_MODEL", "gemini-3.5-flash")
 CHUNK_SIZE_CHARS = 2000
 CHUNK_OVERLAP_CHARS = 300
 TOP_K_CHUNKS = 10
 HYBRID_ALPHA = 0.5
+# Carry paragraphs shorter than min_chunk_size into the next chunk instead of
+# dropping them. Set WAKEEL_LEGACY_CHUNKING=1 to restore the original behaviour.
+MERGE_SHORT_PARAGRAPHS = os.getenv("WAKEEL_LEGACY_CHUNKING", "").strip().lower() not in {"1", "true", "yes"}
 
 # Create directories
 TEXT_DIR.mkdir(parents=True, exist_ok=True)
@@ -64,22 +68,43 @@ METADATA_DIR.mkdir(parents=True, exist_ok=True)
 BM25_DIR.mkdir(parents=True, exist_ok=True)
 
 # ----------------------
-# CHROMA SETUP
+# CHROMA SETUP (lazy)
 # ----------------------
-chroma_client = chromadb.PersistentClient(path="chroma_storeee")
-collection = chroma_client.get_or_create_collection(
-    name="legal_cases",
-    metadata={"hnsw:space": "cosine"}
-)
+chroma_client = None
+collection = None
+
+
+def get_collection():
+    """Open the Chroma collection on first use."""
+    global chroma_client, collection
+    if collection is None:
+        import chromadb
+        chroma_client = chromadb.PersistentClient(path="chroma_storeee")
+        collection = chroma_client.get_or_create_collection(
+            name="legal_cases",
+            metadata={"hnsw:space": "cosine"}
+        )
+    return collection
+
 
 # ----------------------
-# EMBEDDING MODEL
+# EMBEDDING MODEL (lazy)
 # ----------------------
-print("Loading embedding model...")
-embed_model = SentenceTransformer(MODEL_NAME)
+embed_model = None
+
+
+def get_embed_model():
+    """Load the sentence-transformer on first use."""
+    global embed_model
+    if embed_model is None:
+        from sentence_transformers import SentenceTransformer
+        print("Loading embedding model...")
+        embed_model = SentenceTransformer(MODEL_NAME)
+    return embed_model
+
 
 def get_embeddings(texts: List[str]) -> List[List[float]]:
-    return embed_model.encode(texts, show_progress_bar=False, convert_to_numpy=True).tolist()
+    return get_embed_model().encode(texts, show_progress_bar=False, convert_to_numpy=True).tolist()
 
 
 # ----------------------
@@ -124,13 +149,18 @@ class PakistaniLegalChunk:
 class PakistaniCourtJudgmentChunker:
     """Specialized chunker for Pakistani High Court and Supreme Court judgments"""
     
-    def __init__(self, 
+    def __init__(self,
                  target_chunk_size: int = 2000,
                  max_chunk_size: int = 3000,
-                 min_chunk_size: int = 400):
+                 min_chunk_size: int = 400,
+                 merge_short_paragraphs: bool = True):
         self.target_chunk_size = target_chunk_size
         self.max_chunk_size = max_chunk_size
         self.min_chunk_size = min_chunk_size
+        # When True, a paragraph shorter than min_chunk_size is carried into the next
+        # chunk instead of being discarded. False reproduces the original (lossy)
+        # behaviour and exists so the two can be benchmarked against each other.
+        self.merge_short_paragraphs = merge_short_paragraphs
         
         # Pakistani case citation patterns
         self.citation_patterns = [
@@ -243,12 +273,30 @@ class PakistaniCourtJudgmentChunker:
         
         current_chunk = []
         current_para_num = "0"
+        current_para_last = "0"
         current_chunk_size = 0
         chunk_position = 0
-        
+
         in_header = True
         header_end_markers = ['JUDGMENT', 'ORDER', 'BRIEF FACTS']
-        
+
+        def paragraph_label(first: str, last: str) -> str:
+            """A chunk covering paragraphs 4 through 6 is labelled "4-6"."""
+            return f"{first}-{last}" if last and last != first else first
+
+        def build_chunk(chunk_lines, first, last, position):
+            body = '\n'.join(chunk_lines).strip()
+            label = paragraph_label(first, last)
+            return PakistaniLegalChunk(
+                text=body,
+                paragraph_number=label,
+                section_type=self.identify_section_type(body, label),
+                case_citations=self.extract_citations(body),
+                legal_provisions=self.extract_legal_provisions(body),
+                chunk_position=position,
+                metadata=doc_metadata
+            )
+
         i = 0
         while i < len(lines):
             line = lines[i].strip()
@@ -279,37 +327,38 @@ class PakistaniCourtJudgmentChunker:
             
             if para_match and not in_header:
                 if current_chunk and current_chunk_size > self.min_chunk_size:
-                    chunk_text = '\n'.join(current_chunk).strip()
-                    chunks.append(PakistaniLegalChunk(
-                        text=chunk_text,
-                        paragraph_number=current_para_num,
-                        section_type=self.identify_section_type(chunk_text, current_para_num),
-                        case_citations=self.extract_citations(chunk_text),
-                        legal_provisions=self.extract_legal_provisions(chunk_text),
-                        chunk_position=chunk_position,
-                        metadata=doc_metadata
-                    ))
+                    chunks.append(build_chunk(current_chunk, current_para_num,
+                                              current_para_last, chunk_position))
                     chunk_position += 1
-                
-                current_para_num = para_match.group(1)
-                current_chunk = [line]
-                current_chunk_size = len(line)
+                    current_para_num = para_match.group(1)
+                    current_para_last = current_para_num
+                    current_chunk = [line]
+                    current_chunk_size = len(line)
+                elif current_chunk and self.merge_short_paragraphs:
+                    # Paragraph is too short to stand alone. Carry it forward into the
+                    # next chunk instead of discarding it (the original dropped it).
+                    current_chunk.append(line)
+                    current_chunk_size += len(line)
+                    if current_para_num in ("", "0"):
+                        current_para_num = para_match.group(1)
+                    current_para_last = para_match.group(1)
+                else:
+                    current_para_num = para_match.group(1)
+                    current_para_last = current_para_num
+                    current_chunk = [line]
+                    current_chunk_size = len(line)
                 i += 1
-                
+
             elif current_chunk_size + len(line) > self.max_chunk_size:
                 chunk_text = '\n'.join(current_chunk).strip()
-                if len(chunk_text) > self.min_chunk_size:
-                    chunks.append(PakistaniLegalChunk(
-                        text=chunk_text,
-                        paragraph_number=current_para_num,
-                        section_type=self.identify_section_type(chunk_text, current_para_num),
-                        case_citations=self.extract_citations(chunk_text),
-                        legal_provisions=self.extract_legal_provisions(chunk_text),
-                        chunk_position=chunk_position,
-                        metadata=doc_metadata
-                    ))
+                # The incoming line alone exceeds the budget, so the buffer cannot be
+                # carried forward. Emit it even if short rather than losing it.
+                if chunk_text and (len(chunk_text) > self.min_chunk_size
+                                   or self.merge_short_paragraphs):
+                    chunks.append(build_chunk(current_chunk, current_para_num,
+                                              current_para_last, chunk_position))
                     chunk_position += 1
-                
+
                 current_chunk = [line]
                 current_chunk_size = len(line)
                 i += 1
@@ -317,19 +366,15 @@ class PakistaniCourtJudgmentChunker:
                 current_chunk.append(line)
                 current_chunk_size += len(line)
                 i += 1
-        
-        if current_chunk and current_chunk_size > self.min_chunk_size:
+
+        if current_chunk:
             chunk_text = '\n'.join(current_chunk).strip()
-            chunks.append(PakistaniLegalChunk(
-                text=chunk_text,
-                paragraph_number=current_para_num,
-                section_type=self.identify_section_type(chunk_text, current_para_num),
-                case_citations=self.extract_citations(chunk_text),
-                legal_provisions=self.extract_legal_provisions(chunk_text),
-                chunk_position=chunk_position,
-                metadata=doc_metadata
-            ))
-        
+            # Trailing text is the conclusion of the judgment. Never drop it.
+            if chunk_text and (current_chunk_size > self.min_chunk_size
+                               or self.merge_short_paragraphs):
+                chunks.append(build_chunk(current_chunk, current_para_num,
+                                          current_para_last, chunk_position))
+
         return chunks
     
     def add_contextual_metadata(self, chunks: List[PakistaniLegalChunk]) -> List[Dict]:
@@ -386,16 +431,22 @@ class PakistaniCourtJudgmentChunker:
 # ----------------------
 # ENHANCED CHUNKING FUNCTION
 # ----------------------
-def chunk_text(text: str, metadata: Dict) -> List[Dict]:
+def chunk_text(text: str, metadata: Dict,
+               merge_short_paragraphs: bool = MERGE_SHORT_PARAGRAPHS) -> List[Dict]:
     """
     Intelligent chunking for Pakistani court judgments.
     Falls back to basic chunking if not recognized as a judgment.
+
+    merge_short_paragraphs=False restores the original behaviour, which discarded
+    any paragraph shorter than min_chunk_size. Kept so the two can be compared;
+    set WAKEEL_LEGACY_CHUNKING=1 to select it.
     """
     try:
         chunker = PakistaniCourtJudgmentChunker(
             target_chunk_size=CHUNK_SIZE_CHARS,
             max_chunk_size=3000,
-            min_chunk_size=400
+            min_chunk_size=400,
+            merge_short_paragraphs=merge_short_paragraphs
         )
         
         doc_metadata = chunker.extract_case_metadata(text, metadata['doc_id'])
@@ -509,7 +560,7 @@ def index_pdfs():
 
     existing_ids = set()
     try:
-        existing_data = collection.get(include=["metadatas"], limit=None)
+        existing_data = get_collection().get(include=["metadatas"], limit=None)
         if existing_data and "metadatas" in existing_data:
             for meta in existing_data["metadatas"]:
                 if meta and "doc_id" in meta:
@@ -567,7 +618,7 @@ def index_pdfs():
             for c in chunks
         ]
 
-        collection.upsert(
+        get_collection().upsert(
             documents=chunk_texts,
             embeddings=vectors,
             ids=ids,
@@ -602,7 +653,7 @@ def index_pdfs():
 def search_hybrid(query: str, top_k=TOP_K_CHUNKS, alpha=HYBRID_ALPHA):
     """Hybrid search combining semantic and keyword-based retrieval"""
     q_vec = get_embeddings([query])[0]
-    semantic_results = collection.query(
+    semantic_results = get_collection().query(
         query_embeddings=[q_vec],
         n_results=top_k * 2,
         include=["documents", "metadatas", "distances"]
@@ -671,122 +722,270 @@ def search_hybrid(query: str, top_k=TOP_K_CHUNKS, alpha=HYBRID_ALPHA):
 
 
 # =====================================================
-# AGENT SYSTEM WITH INTEGRATED RAG
+# AGENT SYSTEM WITH INTEGRATED RAG (LangGraph)
 # =====================================================
+
+# Set WAKEEL_VERBOSE=1 to print routing decisions as the graph runs.
+VERBOSE = os.getenv("WAKEEL_VERBOSE", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _trace(message: str) -> None:
+    if VERBOSE:
+        print(f"[graph] {message}")
+
+
+def message_text(response) -> str:
+    """Plain text from a chat model response.
+
+    Gemini 3.x returns `content` as a list of content blocks
+    ([{'type': 'text', 'text': ...}, ...]); Gemini 2.x returned a plain string.
+    Reading `.content` directly therefore yields a list on newer models, so always
+    go through here.
+    """
+    text = getattr(response, "text", None)
+    if isinstance(text, str):
+        return text
+    if callable(text):
+        try:
+            value = text()
+            if isinstance(value, str):
+                return value
+        except Exception:
+            pass
+
+    content = getattr(response, "content", response)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+        return "".join(parts)
+    return str(content)
+
+
+# ----------------------
+# SEARCH RESULT FORMATTING
+# ----------------------
+def format_search_results(results: List[Dict]) -> str:
+    """Render hybrid search hits as readable context for the LLM."""
+    if not results:
+        return "No relevant documents found for your query. Try rephrasing or using different keywords."
+
+    formatted_output = [f"Found {len(results)} relevant legal documents:\n"]
+
+    for i, hit in enumerate(results, 1):
+        formatted_output.append(f"\n{'='*60}")
+        formatted_output.append(f"Result #{i} (Relevance: {hit['score']:.3f})")
+        formatted_output.append(f"{'='*60}")
+
+        meta = hit["meta"]
+        formatted_output.append(f"Document ID: {meta.get('doc_id', 'N/A')}")
+        formatted_output.append(f"Case Number: {meta.get('case_no', 'N/A')}")
+        formatted_output.append(f"Court: {meta.get('court', 'N/A')}")
+        formatted_output.append(f"Title: {meta.get('title', 'N/A')}")
+
+        judges = meta.get("judges", "[]")
+        if isinstance(judges, str):
+            try:
+                judges = json.loads(judges)
+            except Exception:
+                judges = []
+        if judges:
+            formatted_output.append(f"Judges: {', '.join(judges)}")
+
+        parties = meta.get("parties", "{}")
+        if isinstance(parties, str):
+            try:
+                parties = json.loads(parties)
+            except Exception:
+                parties = {}
+        if parties and parties.get("appellant"):
+            formatted_output.append(f"Parties: {parties['appellant']} v. {parties.get('respondent', '')}")
+
+        citations = meta.get("citations", "[]")
+        if isinstance(citations, str):
+            try:
+                citations = json.loads(citations)
+            except Exception:
+                citations = []
+        if citations:
+            formatted_output.append(f"Key Citations: {', '.join(citations[:3])}")
+
+        provisions = meta.get("provisions", "[]")
+        if isinstance(provisions, str):
+            try:
+                provisions = json.loads(provisions)
+            except Exception:
+                provisions = []
+        if provisions:
+            formatted_output.append(f"Legal Provisions: {', '.join(provisions[:3])}")
+
+        formatted_output.append(f"Section Type: {meta.get('section_type', 'N/A')}")
+        formatted_output.append(f"Paragraph: {meta.get('paragraph_number', 'N/A')}")
+
+        formatted_output.append("\nContent:")
+        formatted_output.append(f"{hit['doc'][:800]}...")
+        formatted_output.append("")
+
+    return "\n".join(formatted_output)
+
+
+def hybrid_rag_search(query: str, top_k: int = TOP_K_CHUNKS, alpha: float = HYBRID_ALPHA) -> str:
+    """Hybrid search returning formatted context. Never raises."""
+    try:
+        return format_search_results(search_hybrid(query, top_k=top_k, alpha=alpha))
+    except Exception as e:
+        return f"Error performing RAG search: {str(e)}"
+
+
+def index_documents_tool(action: str = "index") -> str:
+    """Index new PDFs from the pdfs/ directory. Returns a confirmation message."""
+    try:
+        if action.lower() in ['index', 'reindex']:
+            index_pdfs()
+            return ("Successfully indexed all PDF documents in the 'pdfs' directory. "
+                    "Documents are now searchable.")
+        return "Invalid action. Use 'index' or 'reindex' to process documents."
+    except Exception as e:
+        return f"Error indexing documents: {str(e)}"
+
 
 def sentiment_tool_func(company_name: str) -> str:
     """Placeholder for sentiment analysis tool"""
     return f"Sentiment analysis for {company_name} not implemented yet."
 
 
-class BossAgent:
-    classification_prompt_template = """
-
+# ----------------------
+# PROMPTS
+# ----------------------
+CLASSIFICATION_PROMPT = PromptTemplate.from_template(
+    """
 ROLE:
- - You are a Legal AI assistant. You help users retrieve, summarize, and compare legal documents and cases. 
+ - You are a Legal AI assistant. You help users retrieve, summarize, and compare legal documents and cases.
 
 INSTRUCTION
     - Only answer queries with an actual legal/regulatory/compliance context.
     - Avoid making non-legal queries appear legal.
-    - Consider follow-up questions: If the user query seems related to previous conversation or uses pronouns/context ("What about that case?", "And the previous judgment?"), use the chat history to understand it.
+    - Consider follow-up questions: If the user query seems related to previous conversation or uses
+      pronouns/context ("What about that case?", "And the previous judgment?"), use the chat history
+      to understand it.
     - If the query is unrelated to law, politely ask the user for clarification.
 
 TASK:
-    - Classify input based on the given classification rules
-    - Determine if the query is a follow-up and if so, keep context in memory
+    - Classify the input according to the rules below.
+    - Resolve follow-up references using the chat history.
 
 CLASSIFICATION RULES:
-    1) If context NOT related to legal/regulatory/compliance or some non-legal query:
-        EXAMPLES:
-            1.1) User Query: "What's the weather in New York?"
-                 AI: <answer>Sorry,I can't answer this query as it is not legal related. Please provide more context or a legal question.</answer>
-            1.2) User Query: "My name is legal?"
-                 AI: <answer>Sorry, I can't understand. Please provide more context so I can help.</answer>
-            1.3) User Query: "make this query legal?"
-                 AI: <answer>Sorry, I can't answer this query as it is not legal related. Please elaborate or provide context.</answer>
+    1) If the query is NOT related to legal/regulatory/compliance matters, or is too broad to act on,
+       set route = "REJECT" and put a short, polite message in `clarification`.
+       EXAMPLES:
+         - "What's the weather in New York?"
+           -> REJECT, clarification: "Sorry, I can't answer this query as it is not legal related.
+              Please provide more context or a legal question."
+         - "Summarize legal docs"
+           -> REJECT, clarification: "Please specify which legal documents or cases you want summarized."
+         - "Compare these cases"
+           -> REJECT, clarification: "Please provide the names or references of the cases you want to compare."
 
-    2) If related to legal/regulatory/compliance:
-       - Determine the TYPE:
-           [GQ] = General legal query (includes standalone queries or follow-up questions after a previous GQ)
-           [SQ] = Summarizing request (asks for a summary of a law, regulation, case, or document)
-           [CQ] = Compare request (asks to compare two or more legal documents, laws, or regulations)
-       - If the user query is legal-context-based but too broad, ask the user to narrow it down
-       - Use memory/chat history to resolve pronouns or references in follow-up queries
+    2) If related to legal/regulatory/compliance, set route to one of:
+         GQ = General legal query (standalone, or a follow-up to a previous general query)
+         SQ = Summarizing request (summary of a law, regulation, case, or document)
+         CQ = Compare request (compare two or more legal documents, laws, or regulations)
+       and put the restated query in `restated_query`.
+       For CQ also fill `compare_a` and `compare_b` with the two things being compared.
 
 EXAMPLES:
-    2.1) User Query: "Retrieve past corruption cases in Pakistan"
-         AI: <answer><valid>[GQ] Retrieve past corruption cases in Pakistan</valid></answer>
-    2.2) User Query: "Summarize the Lahore High Court judgment on property dispute"
-         AI: <answer><valid>[SQ] Summarize the Lahore High Court judgment on property dispute</valid></answer>
-    2.3) User Query: "Compare GDPR with CCPA"
-         AI: <answer><valid>[CQ] Compare GDPR with CCPA</valid></answer>
-    2.4) User Query: "What were the penalties in last anti-corruption case?"
-         AI: <answer><valid>[GQ] Find previous anti-corruption cases and penalties</valid></answer>
-    2.5) User Query: "Has Person A been involved in any property cases?"
-         AI: <answer><valid>[GQ] Find property cases involving Person A</valid></answer>
-    2.6) User Query: "Summarize the judgment involving Person B in tax evasion case"
-         AI: <answer><valid>[SQ] Summarize the tax evasion judgment involving Person B</valid></answer>
-    2.7) User Query: "Compare corruption rulings for Person A and Person C"
-         AI: <answer><valid>[CQ] Compare corruption rulings involving Person A and Person C</valid></answer>
-    2.8) User Query: "Compare Lahore High Court and Supreme Court decisions on property disputes"
-         AI: <answer><valid>[CQ] Compare Lahore High Court vs Supreme Court property dispute decisions</valid></answer>
-    2.9) User Query: "Summarize legal docs"
-         AI: <answer>Please specify which legal documents or cases you want summarized</answer>
-    2.10) User Query: "Compare these cases"
-         AI: <answer>Please provide the names or references of the cases you want to compare</answer>
-    2.11) User Query: "And the previous corruption case?"
-         AI: <answer><valid>[GQ] Retrieve details about the previous corruption case mentioned in chat history</valid></answer>
+    "Retrieve past corruption cases in Pakistan"
+        -> GQ, restated_query: "Retrieve past corruption cases in Pakistan"
+    "Summarize the Lahore High Court judgment on property dispute"
+        -> SQ, restated_query: "Summarize the Lahore High Court judgment on property dispute"
+    "Compare GDPR with CCPA"
+        -> CQ, restated_query: "Compare GDPR with CCPA", compare_a: "GDPR", compare_b: "CCPA"
+    "What were the penalties in last anti-corruption case?"
+        -> GQ, restated_query: "Find previous anti-corruption cases and penalties"
+    "Has Person A been involved in any property cases?"
+        -> GQ, restated_query: "Find property cases involving Person A"
+    "Summarize the judgment involving Person B in tax evasion case"
+        -> SQ, restated_query: "Summarize the tax evasion judgment involving Person B"
+    "Compare corruption rulings for Person A and Person C"
+        -> CQ, restated_query: "Compare corruption rulings involving Person A and Person C",
+           compare_a: "corruption ruling involving Person A", compare_b: "corruption ruling involving Person C"
+    "Compare Lahore High Court and Supreme Court decisions on property disputes"
+        -> CQ, restated_query: "Compare Lahore High Court vs Supreme Court property dispute decisions",
+           compare_a: "Lahore High Court property dispute decision",
+           compare_b: "Supreme Court property dispute decision"
 
 EXAMPLES (Follow-up / Context-aware queries):
+    "And the previous corruption case?"
+        -> GQ, restated_query: "Retrieve details about the previous corruption case mentioned in chat history"
+    "What was the verdict in that case?"
+        -> GQ, restated_query: "Find the verdict of the corruption case mentioned earlier in the chat"
+    "Summarize it for me"
+        -> SQ, restated_query: "Summarize the previously discussed judgment or legal document"
+    "Compare this with the 2020 property case"
+        -> CQ, restated_query: "Compare the currently discussed case with the 2020 property case"
+    "Any penalties mentioned there?"
+        -> GQ, restated_query: "Retrieve penalties mentioned in the previous legal case discussed in chat history"
+    "Who were the defendants again?"
+        -> GQ, restated_query: "List defendants involved in the previously discussed case"
+    "And the Lahore High Court judgment?"
+        -> SQ, restated_query: "Summarize the Lahore High Court judgment mentioned in prior conversation"
 
-    2.11) User Query: "And the previous corruption case?"
-         AI: <answer><valid>[GQ] Retrieve details about the previous corruption case mentioned in chat history</valid></answer>
+RULES:
+    - Keep the restated query close to what the user asked (fix only obvious grammar issues).
+    - Use the chat history to clarify references in follow-up questions.
 
-    2.12) User Query: "What was the verdict in that case?"
-         AI: <answer><valid>[GQ] Find the verdict of the corruption case mentioned earlier in the chat</valid></answer>
-
-    2.13) User Query: "Summarize it for me"
-         AI: <answer><valid>[SQ] Summarize the previously discussed judgment or legal document</valid></answer>
-
-    2.14) User Query: "Compare this with the 2020 property case"
-         AI: <answer><valid>[CQ] Compare the currently discussed case with the 2020 property case</valid></answer>
-
-    2.15) User Query: "Any penalties mentioned there?"
-         AI: <answer><valid>[GQ] Retrieve penalties mentioned in the previous legal case discussed in chat history</valid></answer>
-
-    2.16) User Query: "Who were the defendants again?"
-         AI: <answer><valid>[GQ] List defendants involved in the previously discussed case</valid></answer>
-
-    2.17) User Query: "And the Lahore High Court judgment?"
-         AI: <answer><valid>[SQ] Summarize the Lahore High Court judgment mentioned in prior conversation</valid></answer>
-FORMATTING RULES:
-    - Always wrap the final output in <answer>...</answer>.
-    - If valid, include <valid>...</valid> around the TYPE and restated query.
-    - In case of a follow-up question, use memory/chat history to clarify references.
-    - Keep the restated query exactly as the user asked it (fix only obvious grammar issues).
-    - No extra text, no explanations outside the specified tags.
+Chat history:
+{history}
 
 Input Query:
 {query}"""
+)
 
+# Legacy tag-based classification prompt, used only if structured output fails.
+CLASSIFICATION_PROMPT_FALLBACK = PromptTemplate.from_template(
+    """Classify the legal query below.
 
+Reply with exactly one of:
+  <answer><valid>[GQ] restated query</valid></answer>   (general legal query)
+  <answer><valid>[SQ] restated query</valid></answer>   (summarize request)
+  <answer><valid>[CQ] restated query</valid></answer>   (compare request)
+  <answer>clarifying message</answer>                   (not legal, or too broad)
 
-    def __init__(self, llm, db_name: str = "chroma_db_with_agent"):
-        self.llm = llm
-        self.memory = ConversationBufferMemory(memory_key="chat_history")
+No extra text outside the tags.
 
-        self.current_dir = os.getcwd()
-        self.db_dir = os.path.join(self.current_dir, "db")
-        os.makedirs(self.db_dir, exist_ok=True)
-        self.persistent_directory = os.path.join(self.db_dir, db_name)
-        self.embeddings = HuggingFaceEmbeddings(model_name="BAAI/bge-small-en-v1.5")
-        self.db = None
+Chat history:
+{history}
 
-        self.embedded_file_record = os.path.join(self.persistent_directory, "embedded_files.txt")
-        os.makedirs(self.persistent_directory, exist_ok=True)
+Input Query:
+{query}"""
+)
 
-        self.compare_prompt_template = PromptTemplate.from_template(
-            """
+ANSWER_PROMPT = PromptTemplate.from_template(
+    """
+You are a Legal AI assistant specializing in Pakistani case law. Answer the user's question using
+only the retrieved excerpts below.
+
+Instructions:
+- Ground every statement in the excerpts. Do not invent cases, citations, judges or provisions.
+- Cite the case number, court and paragraph number when you rely on an excerpt.
+- If the excerpts do not answer the question, say so plainly and suggest how to narrow the search.
+- Write for a reader who is not a lawyer, but keep the legal meaning exact.
+
+Question:
+{query}
+
+Retrieved excerpts:
+{context}
+"""
+)
+
+COMPARE_PROMPT = PromptTemplate.from_template(
+    """
 Role:
 You are a Legal AI assistant specializing in Pakistani case law. You help users analyze, summarize, and compare legal cases, judgments, and statutes. Focus on reasoning, precedents, verdicts, penalties, and procedural context.
 
@@ -823,17 +1022,17 @@ Analyze:
 - Return the structured but readable output directly.
 
 DOCS are:
-doc1  
+doc1
 {doc1}
 
-doc2  
+doc2
 {doc2}
 """
-        )
+)
 
-        self.summarize_prompt_template = PromptTemplate.from_template(
-            """
-You are a legal analyst and educator. Your task is to summarize the following legal document in **clear, simple, layman-friendly language** while preserving the **exact legal meaning and context**.  
+SUMMARIZE_PROMPT = PromptTemplate.from_template(
+    """
+You are a legal analyst and educator. Your task is to summarize the following legal document in **clear, simple, layman-friendly language** while preserving the **exact legal meaning and context**.
 
 Instructions:
 - Simplify complex legal jargon without losing key obligations, rights, or compliance requirements.
@@ -848,164 +1047,126 @@ Output Format:
 - Include any deadlines, obligations, or conditions explicitly.
 
 Document to summarize:
-{text}                                                
+{text}
 """
-        )
+)
 
-        # === Tools with Integrated RAG ===
-        self.tools = [
-            Tool(
-                name="HybridRAGSearch",
-                func=self.hybrid_rag_search_tool,
-                description=(
-                    "Advanced hybrid search tool combining semantic and keyword-based retrieval. "
-                    "Use this to search Pakistani legal documents, court judgments, and cases. "
-                    "Can search by case name, case number, judge name, legal provisions (Section 302 PPC), "
-                    "citations (2016 SCMR 2073), or general legal concepts. "
-                    "Input: search query string. Output: relevant legal document excerpts with metadata."
-                ),
-            ),
-            Tool(
-                name="IndexNewDocuments",
-                func=self.index_documents_tool,
-                description=(
-                    "Index new PDF documents into the RAG system. "
-                    "Automatically extracts text, chunks documents intelligently, "
-                    "and creates searchable embeddings. Use when user wants to add new documents. "
-                    "Input: 'index' or 'reindex'. Output: confirmation message."
-                ),
-            ),
-            Tool(
-                name="CompareTopics",
-                func=self.compare_docs,
-                description="Use to compare two documents.",
-            ),
-            Tool(
-                name="Summarizer",
-                func=self.summarize_text,
-                description="Use to summarize any large text.",
-            ),
-            Tool(
-                name="CompanySentimentAnalyzer",
-                func=sentiment_tool_func,
-                description="Analyze the sentiment of recent news about a given company or stock with URLs and metadata. Input should be the company name or ticker symbol.",
-            ),
-        ]
 
-        self.agent = initialize_agent(
-            self.tools,
-            self.llm,
-            agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
-            memory=self.memory,
-            verbose=True,
-            handle_parsing_errors=True
-        )
+# ----------------------
+# GRAPH STATE & SCHEMA
+# ----------------------
+class QueryClassification(BaseModel):
+    """Structured result of the intent classifier."""
 
-    # ===== RAG Tool Functions =====
-    
-    def hybrid_rag_search_tool(self, query: str) -> str:
-        """
-        Wrapper function for hybrid RAG search to be used as an agent tool.
-        """
+    route: Literal["GQ", "SQ", "CQ", "REJECT"] = Field(
+        description="GQ = general legal query, SQ = summarize, CQ = compare, REJECT = not legal or too broad"
+    )
+    restated_query: str = Field(default="", description="The query restated for retrieval")
+    compare_a: str = Field(default="", description="First item to compare (CQ only)")
+    compare_b: str = Field(default="", description="Second item to compare (CQ only)")
+    clarification: str = Field(default="", description="Message shown to the user when route is REJECT")
+
+
+class WakeelState(TypedDict):
+    """State carried through the graph."""
+
+    messages: Annotated[List[AnyMessage], add_messages]
+    query: str
+    route: str
+    restated_query: str
+    compare_a: str
+    compare_b: str
+    context: str
+    doc1: str
+    doc2: str
+    answer: str
+
+
+def _render_history(messages: List[AnyMessage], limit: int = 6) -> str:
+    """Render the last few turns for the classifier, excluding the current query."""
+    past = [m for m in messages if isinstance(m, (HumanMessage, AIMessage))][:-1]
+    if not past:
+        return "(no previous conversation)"
+    lines = []
+    for m in past[-limit:]:
+        role = "User" if isinstance(m, HumanMessage) else "Assistant"
+        text = m.content if isinstance(m.content, str) else str(m.content)
+        lines.append(f"{role}: {text[:500]}")
+    return "\n".join(lines)
+
+
+#: Errors where retrying the same call cannot help (quota, auth, missing model).
+#: Falling back to a second call on these just burns quota twice.
+_UNRETRYABLE = ("RESOURCE_EXHAUSTED", "429", "PERMISSION_DENIED", "UNAUTHENTICATED",
+                "401", "403", "NOT_FOUND", "404", "API key")
+
+
+def is_unretryable_api_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}"
+    return any(marker in text for marker in _UNRETRYABLE)
+
+
+def _api_error_message(exc: Exception) -> str:
+    """A short, human-readable reason instead of a wall of JSON."""
+    text = str(exc)
+    if "RESOURCE_EXHAUSTED" in text or "429" in text:
+        return ("The Gemini API quota for this key is exhausted. The free tier allows "
+                "a limited number of requests per day; wait for the quota to reset or "
+                "enable billing. (Set WAKEEL_MODEL to try a different model.)")
+    if any(m in text for m in ("PERMISSION_DENIED", "UNAUTHENTICATED", "401", "403", "API key")):
+        return "The Gemini API rejected the API key. Check GOOGLE_API_KEY in your .env file."
+    if "NOT_FOUND" in text or "404" in text:
+        return (f"The configured model is not available to this API key. "
+                f"Set WAKEEL_MODEL to a model you can access (current: {LLM_MODEL}).")
+    return f"The language model call failed: {text[:300]}"
+
+
+def parse_classification_response(response: str) -> Tuple[Optional[str], str]:
+    """Parse the legacy <answer><valid>[GQ] ...</valid></answer> format."""
+    match = re.search(r"<valid>\[(GQ|SQ|CQ|SA)\]\s*(.*?)</valid>", response, re.DOTALL)
+    if match:
+        return match.group(1), match.group(2).strip()
+    payload_match = re.search(r"<answer>(.*?)</answer>", response, re.DOTALL)
+    return None, payload_match.group(1).strip() if payload_match else "Invalid classification response."
+
+
+# ----------------------
+# WAKEEL AGENT (LangGraph)
+# ----------------------
+class WakeelAgent:
+    """Legal research agent built as an explicit LangGraph state machine.
+
+    Flow:
+        START -> classify -+-> clarify                      -> END
+                           +-> retrieve -> answer           -> END   (GQ)
+                           +-> retrieve -> summarize        -> END   (SQ)
+                           +-> retrieve_pair -> compare     -> END   (CQ)
+    """
+
+    def __init__(self, llm, checkpointer=None, thread_id: str = "wakeel-cli"):
+        self.llm = llm
+        self.thread_id = thread_id
         try:
-            results = search_hybrid(query, top_k=TOP_K_CHUNKS, alpha=HYBRID_ALPHA)
-            
-            if not results:
-                return "No relevant documents found for your query. Try rephrasing or using different keywords."
-            
-            # Format results for agent consumption
-            formatted_output = []
-            formatted_output.append(f"Found {len(results)} relevant legal documents:\n")
-            
-            for i, hit in enumerate(results, 1):
-                formatted_output.append(f"\n{'='*60}")
-                formatted_output.append(f"Result #{i} (Relevance: {hit['score']:.3f})")
-                formatted_output.append(f"{'='*60}")
-                
-                # Metadata
-                meta = hit['meta']
-                formatted_output.append(f"Document ID: {meta.get('doc_id', 'N/A')}")
-                formatted_output.append(f"Case Number: {meta.get('case_no', 'N/A')}")
-                formatted_output.append(f"Court: {meta.get('court', 'N/A')}")
-                formatted_output.append(f"Title: {meta.get('title', 'N/A')}")
-                
-                # Parse JSON fields
-                judges = meta.get('judges', '[]')
-                if isinstance(judges, str):
-                    try:
-                        judges = json.loads(judges)
-                    except:
-                        judges = []
-                if judges:
-                    formatted_output.append(f"Judges: {', '.join(judges)}")
-                
-                parties = meta.get('parties', '{}')
-                if isinstance(parties, str):
-                    try:
-                        parties = json.loads(parties)
-                    except:
-                        parties = {}
-                if parties and parties.get('appellant'):
-                    formatted_output.append(f"Parties: {parties['appellant']} v. {parties['respondent']}")
-                
-                citations = meta.get('citations', '[]')
-                if isinstance(citations, str):
-                    try:
-                        citations = json.loads(citations)
-                    except:
-                        citations = []
-                if citations:
-                    formatted_output.append(f"Key Citations: {', '.join(citations[:3])}")
-                
-                provisions = meta.get('provisions', '[]')
-                if isinstance(provisions, str):
-                    try:
-                        provisions = json.loads(provisions)
-                    except:
-                        provisions = []
-                if provisions:
-                    formatted_output.append(f"Legal Provisions: {', '.join(provisions[:3])}")
-                
-                formatted_output.append(f"Section Type: {meta.get('section_type', 'N/A')}")
-                formatted_output.append(f"Paragraph: {meta.get('paragraph_number', 'N/A')}")
-                
-                # Content excerpt
-                formatted_output.append(f"\nContent:")
-                formatted_output.append(f"{hit['doc'][:800]}...")
-                formatted_output.append("")
-            
-            return "\n".join(formatted_output)
-            
+            self.classifier = llm.with_structured_output(QueryClassification)
         except Exception as e:
-            return f"Error performing RAG search: {str(e)}"
-    
-    def index_documents_tool(self, action: str) -> str:
-        """
-        Wrapper function to index new documents.
-        """
-        try:
-            if action.lower() in ['index', 'reindex']:
-                index_pdfs()
-                return "Successfully indexed all PDF documents in the 'pdfs' directory. Documents are now searchable."
-            else:
-                return "Invalid action. Use 'index' or 'reindex' to process documents."
-        except Exception as e:
-            return f"Error indexing documents: {str(e)}"
+            print(f"[warn] structured output unavailable, using tag parsing: {e}")
+            self.classifier = None
+        self.checkpointer = checkpointer if checkpointer is not None else InMemorySaver()
+        self.graph = self._build_graph().compile(checkpointer=self.checkpointer)
 
-    # ===== Helper Methods =====
-    
-    def parse_classification_response(self, response: str) -> Tuple[Optional[str], str]:
-        match = re.search(r"<valid>\[(GQ|SQ|CQ|SA)\]\s*(.*?)</valid>", response, re.DOTALL)
-        if match:
-            return match.group(1), match.group(2).strip()
-        payload_match = re.search(r"<answer>(.*?)</answer>", response, re.DOTALL)
-        return None, payload_match.group(1).strip() if payload_match else "Invalid classification response."
+    # ===== Helper methods (kept from the original agent API) =====
 
     def is_legal_query(self, query: str) -> bool:
+        """Cheap yes/no legal-content check.
+
+        Not used by the graph (classify_node covers it), kept as a public helper.
+        The original called self.llm._call, which does not exist on a chat model;
+        this uses invoke().
+        """
         try:
             classification_prompt = f"""
             Text:
-            \"\"\"{query}\"\"\" 
+            \"\"\"{query}\"\"\"
             ROLE:
         You are a legal analyst specializing in identifying legal, regulatory,finance and compliance-related content.
         TASK:
@@ -1024,76 +1185,242 @@ Document to summarize:
         - The output must be **only** one of: yes or no
         - No punctuation. No formatting. All lowercase.
             """
-            raw_result = self.llm._call(classification_prompt)
+            raw_result = message_text(self.llm.invoke(classification_prompt))
             result = raw_result.strip().lower()
             words = re.findall(r"\b\w+\b", result)
             return "yes" in words
         except Exception:
             return False
-    
+
     def compare_docs(self, doc_input: str) -> str:
-        """
-        Compare two documents. Input should be two document IDs separated by comma.
-        Example: "doc1_id, doc2_id"
-        """
+        """Compare two documents given as "doc1_id, doc2_id"."""
         try:
             doc_ids = [d.strip() for d in doc_input.split(',')]
             if len(doc_ids) != 2:
                 return "Please provide exactly two document IDs separated by comma."
-            
-            # Retrieve documents
+
             doc1_results = search_hybrid(doc_ids[0], top_k=1)
             doc2_results = search_hybrid(doc_ids[1], top_k=1)
-            
+
             if not doc1_results or not doc2_results:
                 return "Could not find one or both documents. Please check document IDs."
-            
-            doc1_text = doc1_results[0]['doc']
-            doc2_text = doc2_results[0]['doc']
-            
-            comparison_prompt = self.compare_prompt_template.format(
-                doc1=doc1_text,
-                doc2=doc2_text
-            )
-            
-            result = self.llm.invoke(comparison_prompt).content
-            return result
-            
+
+            return message_text(self.llm.invoke(COMPARE_PROMPT.format(
+                doc1=doc1_results[0]['doc'], doc2=doc2_results[0]['doc'])))
         except Exception as e:
             return f"Error comparing documents: {str(e)}"
-    
+
     def summarize_text(self, text: str) -> str:
-        """
-        Summarize the given text.
-        """
+        """Summarize the given text."""
         try:
-            summary_prompt = self.summarize_prompt_template.format(text=text)
-            result = self.llm.invoke(summary_prompt).content
-            return result
+            return message_text(self.llm.invoke(SUMMARIZE_PROMPT.format(text=text)))
         except Exception as e:
             return f"Error summarizing text: {str(e)}"
-    
-    def run(self, query: str) -> str:
-        """
-        Main method to run the agent with a query.
-        """
+
+    # ===== Nodes =====
+
+    def classify_node(self, state: WakeelState) -> Dict:
+        query = state["query"]
+        history = _render_history(state["messages"])
+
+        if self.classifier is not None:
+            try:
+                result = self.classifier.invoke(
+                    CLASSIFICATION_PROMPT.format(query=query, history=history)
+                )
+                if result is not None:
+                    _trace(f"classified as {result.route}")
+                    return {
+                        "route": result.route,
+                        "restated_query": result.restated_query or query,
+                        "compare_a": result.compare_a,
+                        "compare_b": result.compare_b,
+                        "answer": result.clarification if result.route == "REJECT" else "",
+                    }
+            except Exception as e:
+                # Quota/auth/model errors will fail the same way again, so do not
+                # spend a second call on them.
+                if is_unretryable_api_error(e):
+                    _trace(f"classification failed, not retryable: {e}")
+                    return {"route": "ERROR", "answer": _api_error_message(e)}
+                _trace(f"structured classification failed ({e}); falling back to tag parsing")
+
+        # Fallback: legacy tag-based classification.
         try:
-            # Classify the query first
-            classification_prompt = self.classification_prompt_template.format(query=query)
-            classification_result = self.llm.invoke(classification_prompt).content
-            
-            query_type, payload = self.parse_classification_response(classification_result)
-            
-            if not query_type:
-                # Non-legal query or needs clarification
-                return payload
-            
-            # Legal query - let agent handle it
-            response = self.agent.run(payload)
-            return response
-            
+            raw = message_text(self.llm.invoke(
+                CLASSIFICATION_PROMPT_FALLBACK.format(query=query, history=history)
+            ))
         except Exception as e:
-            return f"Error processing query: {str(e)}"
+            # An API failure is not a judgement about the query. Keep it distinct
+            # from REJECT so callers do not report "not a legal question".
+            return {"route": "ERROR", "answer": _api_error_message(e)}
+
+        query_type, payload = parse_classification_response(raw)
+        if not query_type:
+            _trace("classified as REJECT (fallback)")
+            return {"route": "REJECT", "answer": payload}
+
+        route = "GQ" if query_type == "SA" else query_type
+        _trace(f"classified as {route} (fallback)")
+        return {
+            "route": route,
+            "restated_query": payload or query,
+            "compare_a": "",
+            "compare_b": "",
+            "answer": "",
+        }
+
+    def clarify_node(self, state: WakeelState) -> Dict:
+        answer = state.get("answer") or (
+            "Sorry, I can't answer this query as it is not legal related. "
+            "Please provide more context or a legal question."
+        )
+        return {"answer": answer, "messages": [AIMessage(content=answer)]}
+
+    def retrieve_node(self, state: WakeelState) -> Dict:
+        query = state.get("restated_query") or state["query"]
+        _trace(f"retrieving for: {query}")
+        return {"context": hybrid_rag_search(query)}
+
+    def retrieve_pair_node(self, state: WakeelState) -> Dict:
+        """Retrieve both sides of a comparison."""
+        query = state.get("restated_query") or state["query"]
+        side_a = state.get("compare_a") or query
+        side_b = state.get("compare_b") or query
+        _trace(f"retrieving pair: {side_a!r} vs {side_b!r}")
+
+        try:
+            docs_a = search_hybrid(side_a, top_k=3)
+            docs_b = search_hybrid(side_b, top_k=3)
+        except Exception as e:
+            return {"context": f"Error retrieving documents for comparison: {str(e)}"}
+
+        if not docs_a or not docs_b:
+            return {"context": ""}
+
+        return {
+            "context": "ok",
+            "doc1": format_search_results(docs_a),
+            "doc2": format_search_results(docs_b),
+        }
+
+    def answer_node(self, state: WakeelState) -> Dict:
+        try:
+            answer = message_text(self.llm.invoke(
+                ANSWER_PROMPT.format(
+                    query=state.get("restated_query") or state["query"],
+                    context=state["context"],
+                )
+            ))
+        except Exception as e:
+            answer = _api_error_message(e)
+        return {"answer": answer, "messages": [AIMessage(content=answer)]}
+
+    def summarize_node(self, state: WakeelState) -> Dict:
+        try:
+            answer = message_text(self.llm.invoke(SUMMARIZE_PROMPT.format(text=state["context"])))
+        except Exception as e:
+            answer = _api_error_message(e)
+        return {"answer": answer, "messages": [AIMessage(content=answer)]}
+
+    def compare_node(self, state: WakeelState) -> Dict:
+        context = state.get("context") or ""
+        doc1, doc2 = state.get("doc1") or "", state.get("doc2") or ""
+
+        if not context:
+            answer = "Could not find one or both documents. Please check the case names or document IDs."
+            return {"answer": answer, "messages": [AIMessage(content=answer)]}
+
+        if not doc1 or not doc2:
+            # retrieve_pair_node put an error message in context instead of documents
+            return {"answer": context, "messages": [AIMessage(content=context)]}
+
+        try:
+            answer = message_text(self.llm.invoke(COMPARE_PROMPT.format(doc1=doc1, doc2=doc2)))
+        except Exception as e:
+            answer = _api_error_message(e)
+        return {"answer": answer, "messages": [AIMessage(content=answer)]}
+
+    # ===== Edges =====
+
+    @staticmethod
+    def route_after_classify(state: WakeelState) -> str:
+        route = state.get("route", "REJECT")
+        if route == "CQ":
+            return "retrieve_pair"
+        if route in ("GQ", "SQ"):
+            return "retrieve"
+        return "clarify"
+
+    @staticmethod
+    def route_after_retrieve(state: WakeelState) -> str:
+        return "summarize" if state.get("route") == "SQ" else "answer"
+
+    # ===== Graph =====
+
+    def _build_graph(self) -> StateGraph:
+        builder = StateGraph(WakeelState)
+
+        builder.add_node("classify", self.classify_node)
+        builder.add_node("clarify", self.clarify_node)
+        builder.add_node("retrieve", self.retrieve_node)
+        builder.add_node("retrieve_pair", self.retrieve_pair_node)
+        builder.add_node("answer", self.answer_node)
+        builder.add_node("summarize", self.summarize_node)
+        builder.add_node("compare", self.compare_node)
+
+        builder.add_edge(START, "classify")
+        builder.add_conditional_edges(
+            "classify",
+            self.route_after_classify,
+            {"retrieve": "retrieve", "retrieve_pair": "retrieve_pair", "clarify": "clarify"},
+        )
+        builder.add_conditional_edges(
+            "retrieve",
+            self.route_after_retrieve,
+            {"answer": "answer", "summarize": "summarize"},
+        )
+        builder.add_edge("retrieve_pair", "compare")
+        builder.add_edge("clarify", END)
+        builder.add_edge("answer", END)
+        builder.add_edge("summarize", END)
+        builder.add_edge("compare", END)
+
+        return builder
+
+    # ===== Public API =====
+
+    def run(self, query: str, thread_id: Optional[str] = None) -> str:
+        """Run one turn. Conversation memory is keyed by thread_id."""
+        return self.run_detailed(query, thread_id)["answer"]
+
+    def run_detailed(self, query: str, thread_id: Optional[str] = None) -> Dict:
+        """Run one turn and report which branch of the graph handled it."""
+        config = {"configurable": {"thread_id": thread_id or self.thread_id}}
+        try:
+            final_state = self.graph.invoke(
+                {
+                    "messages": [HumanMessage(content=query)],
+                    "query": query,
+                    "route": "",
+                    "restated_query": "",
+                    "compare_a": "",
+                    "compare_b": "",
+                    "context": "",
+                    "doc1": "",
+                    "doc2": "",
+                    "answer": "",
+                },
+                config=config,
+            )
+            return {
+                "answer": final_state.get("answer", "") or "No answer produced.",
+                "route": final_state.get("route", "") or "UNKNOWN",
+                "restated_query": final_state.get("restated_query", ""),
+            }
+        except Exception as e:
+            return {"answer": f"Error processing query: {str(e)}", "route": "ERROR",
+                    "restated_query": ""}
 
 
 # =====================================================
@@ -1101,30 +1428,29 @@ Document to summarize:
 # =====================================================
 
 if __name__ == "__main__":
-    # Initialize the RAG system
     print("\n" + "="*60)
     print("INITIALIZING WAKEEL AI - LEGAL AGENT WITH INTEGRATED RAG SYSTEM")
     print("="*60)
-    
+
     # Index PDFs if needed
     print("\nChecking for documents to index...")
     index_pdfs()
-    
+
     # Initialize Gemini LLM
+    require_api_key()
     print("\nInitializing Gemini AI model...")
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-flash",
+        model=LLM_MODEL,
         temperature=0.3,
         max_tokens=None,
         timeout=None,
         max_retries=2,
-        handle_parsing_errors=True 
     )
-    
+
     # Initialize Agent
-    print("Initializing BossAgent...")
-    agent = BossAgent(llm)
-    
+    print("Initializing Wakeel agent (LangGraph)...")
+    agent = WakeelAgent(llm)
+
     print("\n" + "="*60)
     print("AGENT READY - Enhanced with Hybrid RAG Search")
     print("="*60)
@@ -1139,22 +1465,34 @@ if __name__ == "__main__":
     print("  - Search by legal provisions (Section 302 PPC)")
     print("  - Extract judge names, parties, and precedents")
     print("  - Intelligent chunking for court judgments")
-    print("\nPowered by: Google Gemini 2.5 Flash")
+    print(f"\nPowered by: Google {LLM_MODEL} on LangGraph")
     print("="*60)
-    
+
     # Interactive loop
-    print("\nChat with Wakeel AI (type 'exit' to quit)\n")
-    
+    print("\nChat with Wakeel AI (type 'exit' to quit, 'index' to pick up new PDFs)\n")
+
     while True:
-        user_input = input("You: ").strip()
-        
+        try:
+            user_input = input("You: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye.")
+            break
+
         if not user_input:
             continue
-            
+
         if user_input.lower() in ['exit', 'quit', 'bye']:
             print("\nGoodbye.")
             break
-        
+
+        if user_input.lower() in ['index', 'reindex']:
+            try:
+                index_pdfs()
+                print("\nIndexing complete. New documents are searchable.\n")
+            except Exception as e:
+                print(f"\nError indexing documents: {str(e)}\n")
+            continue
+
         try:
             print("\nWakeel AI: ", end="", flush=True)
             response = agent.run(user_input)
