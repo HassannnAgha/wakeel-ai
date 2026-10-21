@@ -1156,34 +1156,46 @@ class WakeelAgent:
 
     # ===== Helper methods (kept from the original agent API) =====
 
-    def is_legal_query(self, query: str) -> bool:
-        """Cheap yes/no legal-content check.
+    def is_legal_document(self, text: str) -> bool:
+        """Cheap yes/no check that a piece of text is Pakistani legal content.
 
-        Not used by the graph (classify_node covers it), kept as a public helper.
-        The original called self.llm._call, which does not exist on a chat model;
-        this uses invoke().
+        Works on a short query or on the extracted text of an uploaded document,
+        so it can gate document upload (an FIR, legal notice or court order)
+        before indexing. Query routing itself is handled by classify_node.
         """
         try:
             classification_prompt = f"""
             Text:
-            \"\"\"{query}\"\"\"
-            ROLE:
-        You are a legal analyst specializing in identifying legal, regulatory,finance and compliance-related content.
-        TASK:
-        Your task is to analyze the following text and determine if it contains or is derived from legal,fiance, regulatory, or compliance-related content.
+            \"\"\"{text[:6000]}\"\"\"
 
-        Criteria:
-        - 8-K or 10-K forms
-        - Includes laws, regulations,policies or compliance policies, terms, obligations, agreements, equity, regulations
-        - Mentions stakeholders, filings, or stocks in a legal or regulatory context
-        - References SEC rules, corporate governance, or compensation policies
-        - Discusses board responsibilities, legal risks, disclosures, or obligations
+ROLE:
+You are a legal analyst who identifies Pakistani legal, regulatory and judicial content.
 
-        Output Instructions:
-        - Respond with **only** one word: yes or no
-        - Do **not** explain, elaborate, or add any other text
-        - The output must be **only** one of: yes or no
-        - No punctuation. No formatting. All lowercase.
+TASK:
+Decide whether the text above is, or is derived from, a Pakistani legal document or a
+question about Pakistani law.
+
+Criteria (any one is enough):
+- A judgment, order, decree or writ of a Pakistani court (Supreme Court, a High Court,
+  or a district or sessions court)
+- An FIR, charge sheet, bail application, legal notice, plaint, written statement,
+  power of attorney or affidavit
+- Cites Pakistani case law (SCMR, PLD, PLJ, CLC, YLR, MLD, AIR)
+- References Pakistani statutes or provisions: PPC, Cr.P.C., CPC, Qanun-e-Shahadat,
+  the Constitution of Pakistan, or a numbered Section, Article, Order or Rule
+- Uses litigation vocabulary such as appellant, respondent, petitioner, accused,
+  complainant, counsel, or names a presiding judge
+- Sets out rights, obligations, penalties, sentences or procedural requirements
+  under Pakistani law
+
+Answer no for general news, commentary, academic writing or commercial documents that
+merely mention the law in passing.
+
+Output Instructions:
+- Respond with **only** one word: yes or no
+- Do **not** explain, elaborate, or add any other text
+- The output must be **only** one of: yes or no
+- No punctuation. No formatting. All lowercase.
             """
             raw_result = message_text(self.llm.invoke(classification_prompt))
             result = raw_result.strip().lower()
