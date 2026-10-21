@@ -2,10 +2,15 @@
 
 **Your AI legal research assistant for Pakistani case law.**
 
-Wakeel AI searches, summarizes and compares Pakistani court judgments (Supreme Court, Lahore,
-Sindh and Islamabad High Courts) using a hybrid RAG pipeline and a Gemini-powered LangGraph agent. It
-understands how Pakistani judgments are structured. It extracts case numbers, parties, judges,
-citations (SCMR, PLD, PLJ) and provisions (PPC, CrPC, Constitution) so you can search by any of them.
+Wakeel AI searches, summarizes and compares Pakistani court judgments using a hybrid RAG
+pipeline and a Gemini-powered LangGraph agent. Rather than splitting documents on a fixed
+character count, it understands how judgments are structured: it chunks on numbered
+paragraphs and extracts case citations (SCMR, PLD, PLJ) and statutory provisions
+(PPC, CrPC, Constitution) so you can search by either.
+
+Built and measured against **Lahore High Court** judgments. The chunker recognises
+Supreme Court, Sindh and Islamabad High Court formats too, but those are not yet verified
+— see [Current limitations](#current-limitations).
 
 > Built for the **4th International AI Championship (AIEF, 2026)**, category *Intelligent App Creation*.
 > See [PROPOSAL.md](PROPOSAL.md) for the full project proposal.
@@ -13,7 +18,7 @@ citations (SCMR, PLD, PLJ) and provisions (PPC, CrPC, Constitution) so you can s
 ## Features
 
 - **Judgment-aware chunking:** splits on numbered paragraphs and tags each chunk as header / facts / arguments / analysis / conclusion
-- **Metadata extraction:** court, case number, parties, judges, hearing date, case citations, statutory provisions
+- **Citation and provision extraction:** case citations (SCMR, PLD, PLJ, AIR) and statutory provisions (PPC, CrPC, Constitution), attached to every chunk
 - **Hybrid search:** dense embeddings (`BAAI/bge-large-en-v1.5` + ChromaDB) combined with BM25 keyword search
 - **Agentic routing:** a LangGraph state machine classifies each query as general / summarize / compare and routes it down a dedicated branch
 - **Conversational memory:** follow-ups like *"what was the verdict in that case?"* work
@@ -123,6 +128,24 @@ Among the paragraphs that would otherwise be dropped was *"The law favours
 adjudication on merits. Technicalities should not..."* — a holding, not boilerplate.
 
 Set `WAKEEL_LEGACY_CHUNKING=1` to run with the original behaviour for comparison.
+
+## Current limitations
+
+Measured honestly, so you know what is and isn't working:
+
+| Area | Status |
+|---|---|
+| Chunking, citations, provisions | Working. 603 citations and 821 provisions extracted across 49 judgments. |
+| Court name | Extracted cleanly for 55% of judgments; the rest run together with following lines. |
+| Case number | 26%. Only some of the many case-number formats are matched. |
+| Hearing date | 24%. |
+| Parties, judges | 4% and 8%. The header patterns assume a format real judgments do not use. |
+| Courts other than Lahore | Untested. The Supreme Court site blocks automated downloads and the Sindh portal requires a login, so no corpus was available. |
+| Scanned / image-only PDFs | Not handled; text extraction returns empty and the document is skipped. |
+| Urdu text | Untested. |
+
+Structural metadata extraction is the main known gap. Search, chunking and the agent do
+not depend on it — it affects the case/party/judge labels shown alongside results.
 
 ## Roadmap
 
