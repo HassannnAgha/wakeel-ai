@@ -188,8 +188,7 @@ not depend on it — it affects the case/party/judge labels shown alongside resu
 
 ## Roadmap
 
-Full details are in [PROPOSAL.md](PROPOSAL.md#5-key-features--deliverables). Ticked items are built and
-tested on the `ui-redesign` branch.
+Full details are in [PROPOSAL.md](PROPOSAL.md#5-key-features--deliverables). Ticked items are built and tested.
 
 **Round 2: Screening**
 - [x] Web application with a source-paragraph panel (a dependency-free server rather than Streamlit)
@@ -204,7 +203,7 @@ tested on the `ui-redesign` branch.
 - [ ] Cross-encoder re-ranking and Reciprocal Rank Fusion (not needed so far: hybrid search already finds
       the right judgment in the top 10 for 99.5% of the 50 test questions)
 - [x] Statute linker: the Constitution, PPC, CrPC, CPC and the main family laws, word for word with sources
-- [x] Evaluation benchmark: Recall@k and MRR ([EVALUATION.md](EVALUATION.md)), plus a citation fact check on
+- [x] Evaluation benchmark: Recall@k and MRR (`evaluate_retrieval.py`), plus a citation fact check on
       every answer
 
 **Final Round**
