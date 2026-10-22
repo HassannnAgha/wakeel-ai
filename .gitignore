@@ -1,16 +1,18 @@
 # Secrets
 .env
 
-# Generated indexes and caches (rebuilt automatically from pdfs/)
+# Generated indexes. Rebuilt from pdfs/ by index_pdfs(), so they are not
+# committed: chroma.sqlite3 and bm25.pkl are binaries git cannot merge, and
+# two people committing them would conflict on every re-index.
 texts/
 metadata/
 bm25_index/
 chroma_storeee/
 db/
 
-# Source judgments (add your own locally)
-pdfs/*
-!pdfs/.gitkeep
+# Source judgments: committed on this branch so Warda has the same corpus.
+# The scraper only finds ~11% of candidate numbers, so re-scraping would
+# produce a different set.
 
 # Python
 __pycache__/
@@ -20,5 +22,22 @@ venv/
 .pytest_cache/
 .vscode/
 
-# Internal planning doc (not for the public repo)
+# Shared index archive
+
+# Saved demo answers (python ui.py --cache)
+demo_cache/
+logs/
+
+# Local-only planning, demo and handoff material
 FINAL_PLAN.md
+HANDOFF*.md
+QANOONAI_COMPARISON.md
+DEMO_SCRIPT.md
+demo/
+demo_prep.py
+preflight.py
+wakeel-index.zip
+
+# Source judgments (add your own locally)
+pdfs/*
+!pdfs/.gitkeep

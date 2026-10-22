@@ -24,6 +24,14 @@ Supreme Court, Sindh and Islamabad High Court formats too, but those are not yet
 - **Conversational memory:** follow-ups like *"what was the verdict in that case?"* work
 - **Plain-language summaries** and **side-by-side case comparison**
 - **Incremental indexing:** only new PDFs get processed
+- **Web app pages:** Ask, Summarize, Compare (two judgments, or a cited review table of many judgments and
+  your own documents), Explain (your FIR, notice or order, with red flags), Draft (documents, optionally in
+  your own style, and workflows: strategy memo, hearing preparation, chronology, client letter), Guides,
+  Calculate (limitation, inheritance), Library (judgments, statutes, insights, activity), Matters
+- **Trust:** every answer links each claim to its paragraph; a fact check (no AI) looks for every name,
+  section, number and quotation in the cited paragraph; statutes (Constitution, PPC, CrPC, CPC, family
+  laws) open word for word from official copies; case citations open the library judgments that rely on them
+- **Urdu and English voice input**, and a **provider fallback** (Gemini and OpenAI stand in for each other)
 
 ## Architecture
 
@@ -82,8 +90,12 @@ The first run downloads the embedding model and indexes every PDF. Later runs on
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `GOOGLE_API_KEY` | — | Required. From [Google AI Studio](https://aistudio.google.com/apikey). |
-| `WAKEEL_MODEL` | `gemini-3.5-flash` | Chat model. `gemini-2.5-flash` is retired for new keys. |
+| `GOOGLE_API_KEY` | — | Required for Gemini. From [Google AI Studio](https://aistudio.google.com/apikey). |
+| `WAKEEL_PROVIDER` | `gemini` | Chat model provider: `gemini` or `openai`. |
+| `OPENAI_API_KEY` | — | Required when `WAKEEL_PROVIDER=openai`. From [OpenAI](https://platform.openai.com/api-keys). |
+| `WAKEEL_MODEL` | `gemini-3.5-flash` / `gpt-4o-mini` | Chat model; the default depends on the provider. `gemini-2.5-flash` is retired for new keys. |
+| `WAKEEL_FALLBACK` | on | When the other provider's key is also set, a failed or hung call (quota, outage) is answered by the other provider instead. Set to `0` to turn off. |
+| `WAKEEL_TIMEOUT` | `90` | Seconds one request to the main provider may take before the fallback answers. |
 | `WAKEEL_VERBOSE` | off | Set to `1` to print routing decisions as the graph runs. |
 | `WAKEEL_LEGACY_CHUNKING` | off | Set to `1` to restore the original chunking behaviour. |
 
@@ -97,6 +109,33 @@ switch `WAKEEL_MODEL` to a model with quota left.
 - `Summarize the Lahore High Court judgment in Criminal Appeal 123 of 2019`
 - `Which judgments cite 2016 SCMR 2073?`
 - `Compare these two murder appeals: <doc_id_1>, <doc_id_2>`
+
+## API
+
+Everything in the web app is available over plain HTTP and JSON; the app's own pages use
+the same endpoints. Open http://127.0.0.1:8000/developers for the full list with examples.
+
+```bash
+curl -s http://127.0.0.1:8000/api/chat -H "Content-Type: application/json" \
+  -d '{"message": "Find bail cases under Section 497 CrPC", "mode": "lawyer", "language": "en"}'
+```
+
+Main endpoints: `POST /api/chat` (and `/api/chat/stream` for live agent steps),
+`/api/summarize`, `/api/compare`, `/api/table`, `/api/explain`, `/api/explain/ask`, `/api/draft`,
+`/api/workflow`, `/api/feedback`; `GET /api/judgments`, `/api/judgments/<doc_id>`, `/api/statutes`,
+`/api/citations`, `/api/insights`, `/api/activity`, `/api/stats`.
+
+### Use Wakeel AI from Claude or ChatGPT (MCP)
+
+`mcp_server.py` exposes the judgments and statutes as MCP tools (`search_judgments`,
+`get_judgment`, `list_judgments`, `get_statute`, `search_statutes`) over stdio, with no extra
+dependencies and no API key. Add it to an MCP client, for example Claude Desktop:
+
+```json
+{"mcpServers": {"wakeel": {
+  "command": "C:/path/to/aief/.venv/Scripts/python.exe",
+  "args": ["C:/path/to/aief/mcp_server.py"]}}}
+```
 
 ## Building a corpus
 
@@ -149,26 +188,34 @@ not depend on it — it affects the case/party/judge labels shown alongside resu
 
 ## Roadmap
 
-Full details are in [PROPOSAL.md](PROPOSAL.md#5-key-features--deliverables).
+Full details are in [PROPOSAL.md](PROPOSAL.md#5-key-features--deliverables). Ticked items are built and
+tested on the `ui-redesign` branch.
 
 **Round 2: Screening**
-- [ ] Streamlit web application with a source-paragraph panel, deployed publicly
-- [ ] Answers that cite case, court and paragraph, with a "not found in sources" response
-- [ ] Pre-indexed demonstration corpus
+- [x] Web application with a source-paragraph panel (a dependency-free server rather than Streamlit)
+- [x] Answers that cite case, court and paragraph, with a "not found in sources" response
+- [x] Pre-indexed demonstration corpus (49 Lahore High Court judgments)
+- [ ] Deployed publicly (it runs locally; not deployed)
 
 **Round 3: Mentorship**
-- [ ] Citizen, student and lawyer answer modes
-- [ ] Urdu and Roman Urdu support, with speech input
-- [ ] Document explanation for FIRs, legal notices and court orders
-- [ ] Cross-encoder re-ranking and Reciprocal Rank Fusion
-- [ ] Statute linker (Pakistan Code)
-- [ ] Evaluation benchmark (Recall@k, MRR, faithfulness)
+- [x] Citizen and lawyer answer modes
+- [x] Urdu and Roman Urdu answers, with Urdu and English speech input
+- [x] Document explanation for FIRs, legal notices and court orders, with red flags
+- [ ] Cross-encoder re-ranking and Reciprocal Rank Fusion (not needed so far: hybrid search already finds
+      the right judgment in the top 10 for 99.5% of the 50 test questions)
+- [x] Statute linker: the Constitution, PPC, CrPC, CPC and the main family laws, word for word with sources
+- [x] Evaluation benchmark: Recall@k and MRR ([EVALUATION.md](EVALUATION.md)), plus a citation fact check on
+      every answer
 
 **Final Round**
-- [ ] Precedent citation graph
-- [ ] Case timeline extraction
-- [ ] OCR for scanned judgments
-- [ ] Answer-quality feedback collection
+- [x] Precedent citation graph (each judgment's precedents and the judgments that share them)
+- [x] Case timeline extraction (the chronology workflow, with quoted dates)
+- [ ] OCR for scanned judgments at indexing time (uploaded scans are already read on the Explain page)
+- [x] Answer-quality feedback collection (helpful / not helpful, and an activity view)
+
+**Added beyond the plan:** review tables over many judgments and your own documents, drafting (also in your
+own style), workflows (strategy memo, hearing preparation, client letter), calculators, citizen guides, saved
+matters, an MCP server and an HTTP API.
 
 ## Team
 

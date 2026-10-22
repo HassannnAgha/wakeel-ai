@@ -17,7 +17,6 @@ from pydantic import BaseModel, Field
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from langchain_core.prompts import PromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph, add_messages
 
@@ -27,15 +26,26 @@ from langgraph.graph import END, START, StateGraph, add_messages
 # a 1.3 GB embedding model.
 from rank_bm25 import BM25Okapi
 
-# === Load Google API Key from .env ===
+# === Load API keys from .env ===
 from dotenv import load_dotenv
 load_dotenv()
+
+# Chat model provider: "gemini" (default) or "openai", chosen with WAKEEL_PROVIDER.
+# Each provider has its own key variable and default model; WAKEEL_MODEL overrides the model.
+PROVIDERS = {
+    "gemini": {"label": "Gemini", "key_env": "GOOGLE_API_KEY", "model": "gemini-3.5-flash"},
+    "openai": {"label": "OpenAI", "key_env": "OPENAI_API_KEY", "model": "gpt-4o-mini"},
+}
+LLM_PROVIDER = os.getenv("WAKEEL_PROVIDER", "gemini").strip().lower()
+if LLM_PROVIDER not in PROVIDERS:
+    raise SystemExit(f"WAKEEL_PROVIDER must be one of {', '.join(PROVIDERS)}, not {LLM_PROVIDER!r}.")
+API_KEY_ENV = PROVIDERS[LLM_PROVIDER]["key_env"]
 
 
 def require_api_key() -> None:
     """Called before the LLM is constructed. Indexing and chunking do not need a key."""
-    if not os.getenv("GOOGLE_API_KEY"):
-        raise SystemExit("GOOGLE_API_KEY is not set. Copy .env.example to .env and add your key.")
+    if not os.getenv(API_KEY_ENV):
+        raise SystemExit(f"{API_KEY_ENV} is not set. Copy .env.example to .env and add your key.")
 
 
 # =====================================================
@@ -50,10 +60,66 @@ TEXT_DIR = Path("texts")
 METADATA_DIR = Path("metadata")
 BM25_DIR = Path("bm25_index")
 MODEL_NAME = "BAAI/bge-large-en-v1.5"
-# Gemini chat model. gemini-2.5-flash was retired for new API keys in 2026.
+# Chat model. Gemini: gemini-2.5-flash was retired for new API keys in 2026.
 # Measured on the routing test set: 3.5-flash scored 9/9 at ~5.5s median, while
 # 3.6-flash was rate-limited and 3-flash-preview scored 6/9 with 190s outliers.
-LLM_MODEL = os.getenv("WAKEEL_MODEL", "gemini-3.5-flash")
+# OpenAI: gpt-4o-mini, the cheapest of the small models (~$0.15 / $0.60 per million
+# input / output tokens); set WAKEEL_MODEL=gpt-4.1-mini for stronger instruction following.
+LLM_MODEL = os.getenv("WAKEEL_MODEL") or PROVIDERS[LLM_PROVIDER]["model"]
+
+
+def make_llm(temperature: float = 0.3, model: Optional[str] = None,
+             provider: Optional[str] = None, max_retries: int = 2, timeout: Optional[float] = None):
+    """Build the chat model for the configured provider.
+
+    The provider's package is imported here, so only the one in use has to load.
+    """
+    provider = provider or LLM_PROVIDER
+    model = model or (LLM_MODEL if provider == LLM_PROVIDER else PROVIDERS[provider]["model"])
+    if provider == "openai":
+        from langchain_openai import ChatOpenAI
+        kwargs = {"model": model, "max_retries": max_retries, "timeout": timeout}
+        # Reasoning models (gpt-5, o-series) accept only the default temperature.
+        if not model.startswith(("gpt-5", "o1", "o3", "o4")):
+            kwargs["temperature"] = temperature
+        return ChatOpenAI(**kwargs)
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    return ChatGoogleGenerativeAI(model=model, temperature=temperature,
+                                  max_tokens=None, timeout=timeout, max_retries=max_retries)
+
+
+def fallback_provider() -> Optional[str]:
+    """The other provider, if its key is set. WAKEEL_FALLBACK=0 turns the fallback off."""
+    if os.getenv("WAKEEL_FALLBACK", "1").strip().lower() in {"0", "false", "no", "off"}:
+        return None
+    other = next(p for p in PROVIDERS if p != LLM_PROVIDER)
+    return other if os.getenv(PROVIDERS[other]["key_env"]) else None
+
+
+#: How long one request to the main provider may take before the fallback answers instead.
+PRIMARY_TIMEOUT_S = float(os.getenv("WAKEEL_TIMEOUT", "90"))
+
+
+def make_chat_model(temperature: float = 0.3):
+    """The configured model, with the other provider standing in when a call fails.
+
+    A quota error, an outage or a hung request on the main provider is retried once and
+    then sent to the other provider's default model, so a demo does not stop on one
+    provider's bad minute. The fallback is only called when the main provider fails.
+    """
+    other = fallback_provider()
+    if not other:
+        return make_llm(temperature)
+    primary = make_llm(temperature, max_retries=1, timeout=PRIMARY_TIMEOUT_S)
+    return primary.with_fallbacks([make_llm(temperature, provider=other)])
+
+
+def structured(llm, schema):
+    """llm.with_structured_output(schema), kept working through a fallback chain."""
+    from langchain_core.runnables import RunnableWithFallbacks
+    if isinstance(llm, RunnableWithFallbacks):
+        return structured(llm.runnable, schema).with_fallbacks([structured(f, schema) for f in llm.fallbacks])
+    return llm.with_structured_output(schema)
 CHUNK_SIZE_CHARS = 2000
 CHUNK_OVERLAP_CHARS = 300
 TOP_K_CHUNKS = 10
@@ -193,45 +259,123 @@ class PakistaniCourtJudgmentChunker:
         }
         
         header = text[:3000]
-        
-        # Court name
-        court_match = re.search(r'IN\s+THE\s+([A-Z\s]+COURT[A-Z\s]*)', header, re.IGNORECASE)
-        if court_match:
-            metadata["court"] = court_match.group(1).strip()
-        
-        # Case numbers
-        case_patterns = [
-            r'Criminal\s+Appeal\s+No\.?\s*(\d+)\s+of\s+(\d{4})',
-            r'Civil\s+Appeal\s+No\.?\s*(\d+)\s+of\s+(\d{4})',
-            r'Murder\s+Reference\s+No\.?\s*(\d+)\s+of\s+(\d{4})',
-            r'Writ\s+Petition\s+No\.?\s*(\d+)\s+of\s+(\d{4})',
-        ]
-        for pattern in case_patterns:
-            match = re.search(pattern, header, re.IGNORECASE)
-            if match:
-                metadata["judgment_type"] = re.search(r'[A-Za-z\s]+', pattern).group(0).strip()
-                metadata["case_number"] = f"{match.group(1)}/{match.group(2)}"
+        lines = [ln.strip() for ln in header.split('\n')]
+
+        # --- Court -------------------------------------------------------
+        # Match within a single line. The old pattern used [A-Z\s]*, and \s
+        # matches newlines, so it swallowed "JUDICIAL DEPARTMENT" and the
+        # case-number line along with the court name.
+        for line in lines[:12]:
+            m = re.match(
+                r'^(?:IN\s+THE\s+)?((?:LAHORE|SINDH|PESHAWAR|BALOCHISTAN|ISLAMABAD)\s+HIGH\s+COURT'
+                r'|SUPREME\s+COURT\s+OF\s+PAKISTAN|FEDERAL\s+SHARIAT\s+COURT)'
+                r'[,\s]*([A-Z][A-Za-z]*(?:\s+BENCH)?)?',
+                line, re.IGNORECASE)
+            if m:
+                court = re.sub(r'\s+', ' ', m.group(1)).upper()
+                bench = (m.group(2) or "").strip().upper()
+                # "LAHORE HIGH COURT, LAHORE" adds nothing; a real bench does.
+                if bench and bench not in court and bench != "JUDICIAL":
+                    court = f"{court}, {bench}"
+                metadata["court"] = court
                 break
+
+        if not metadata["court"]:
+            # Some PDFs extract as "L A HOR E HIGH C OUR T". Collapse spaces and
+            # match on the squashed form.
+            known = {
+                "LAHOREHIGHCOURT": "LAHORE HIGH COURT",
+                "SINDHHIGHCOURT": "SINDH HIGH COURT",
+                "PESHAWARHIGHCOURT": "PESHAWAR HIGH COURT",
+                "BALOCHISTANHIGHCOURT": "BALOCHISTAN HIGH COURT",
+                "ISLAMABADHIGHCOURT": "ISLAMABAD HIGH COURT",
+                "SUPREMECOURTOFPAKISTAN": "SUPREME COURT OF PAKISTAN",
+                "FEDERALSHARIATCOURT": "FEDERAL SHARIAT COURT",
+            }
+            for line in lines[:12]:
+                squashed = re.sub(r'\s+', '', line).upper()
+                for key, name in known.items():
+                    if key in squashed:
+                        metadata["court"] = name
+                        break
+                if metadata["court"]:
+                    break
+
+        # --- Case number -------------------------------------------------
+        # Case types are too varied to enumerate (Writ Petition, Crl. Misc.,
+        # R.S.A., C.R., EFA, Customs Reference, W.P. ...), so match the shape:
+        #   <type> No<.|:> <digits>[-suffix] <of|/|-> <year>
+        # Seen as "No.6404 of 2020", "No.6917/2023", "No.61551-M of 2022",
+        # "No.50725-2022", "No. 174-D of 2009" and "No .36910 of 2022".
+        number_re = re.compile(
+            r'No\s*[.:]?\s*(\d+)\s*(?:[-/][A-Za-z0-9]+)*\s*(?:of|/|-)\s*((?:19|20)\d{2})\b',
+            re.IGNORECASE)
+        for line in lines[:20]:
+            # "Form No.HCJD/C-121" is the court's stationery code, not a case.
+            if re.match(r'^\s*Form\s+No', line, re.IGNORECASE):
+                continue
+            m = number_re.search(line)
+            if m:
+                prefix = line[:m.start()].strip(' .,:;-')
+                # "Case No. Crl.Misc.No. 261-B of 2023" leaves "Case No. Crl.Misc";
+                # drop the redundant leading "Case No." so the label reads "Crl.Misc".
+                prefix = re.sub(r'^Case\s*(?:No\.?)?\s*', '', prefix, flags=re.IGNORECASE)
+                if prefix and len(prefix) <= 40:
+                    metadata["judgment_type"] = re.sub(r'\s+', ' ', prefix).strip(' .')
+                metadata["case_number"] = f"{m.group(1)}/{m.group(2)}"
+                break
+
+        # --- Parties -----------------------------------------------------
+        # Two layouts: inline "A Vs. B", or A / "Versus" / B on separate lines.
+        noise = re.compile(r'^(?:versus|vs\.?|v/s)$', re.IGNORECASE)
+
+        def clean_party(s: str) -> str:
+            s = re.sub(r'\s+', ' ', s).strip(' .,:;')
+            # "& others" needs no \b before the ampersand: \b does not match
+            # between a space and a non-word character.
+            s = re.sub(r'\s*(?:etc\.?|and\s+others?|&\s*others?|and\s+another)\s*\.?$', '',
+                       s, flags=re.IGNORECASE)
+            return s.strip(' .,&')
+
+        for i, line in enumerate(lines[:20]):
+            inline = re.match(r'^(.{2,80}?)\s+(?:Vs\.?|Versus|V/S|v\.)\s+(.{2,80})$',
+                              line, re.IGNORECASE)
+            if inline:
+                metadata["parties"]["appellant"] = clean_party(inline.group(1))
+                metadata["parties"]["respondent"] = clean_party(inline.group(2))
+                break
+            if noise.match(line) and i and lines[i - 1] and i + 1 < len(lines):
+                before, after = lines[i - 1], lines[i + 1]
+                if 2 < len(before) < 80 and 2 < len(after) < 80:
+                    metadata["parties"]["appellant"] = clean_party(before)
+                    metadata["parties"]["respondent"] = clean_party(after)
+                    break
+
+        # --- Judges ------------------------------------------------------
+        # Real judgments open with "MUHAMMAD SAJID MEHMOOD SETHI, J.:" or
+        # "Shahid Karim, J:-." The old pattern expected "MR. JUSTICE Name".
+        seen = []
+        for line in lines[:40]:
+            # "NAME, J.:", "Name, J:-." and "NAME-J :" all occur.
+            m = re.match(r"^([A-Z][A-Za-z.']*(?:\s+[A-Z][A-Za-z.']*){0,4})\s*[,\-]\s*"
+                         r"(?:J|C\.?J|JJ)\b\.?\s*[:\-.]*", line)
+            if m:
+                name = m.group(1).strip()
+                if name.upper() not in ("JUDGMENT", "ORDER") and name not in seen:
+                    seen.append(name)
+        for m in re.finditer(r"(?:HON'BLE\s+)?MR\.?\s+JUSTICE\s+"
+                             r"([A-Z][A-Za-z.\-']*(?:\s+[A-Z][A-Za-z.\-']*){0,4})",
+                             header, re.IGNORECASE):
+            name = m.group(1).strip()
+            if name not in seen:
+                seen.append(name)
+        metadata["judges"] = seen
         
-        # Party names
-        party_match = re.search(r'\(([^)]+?)\s+(?:v\.|versus)\s+([^)]+?)\)', header, re.IGNORECASE)
-        if party_match:
-            metadata["parties"]["appellant"] = party_match.group(1).strip()
-            metadata["parties"]["respondent"] = party_match.group(2).strip()
-        
-        # Judge names
-        judge_section = re.search(r'(?:JUDGMENT|CORAM)[:\s]+(.*?)(?:Date of hearing|JUDGMENT|$)', 
-                                 header, re.DOTALL | re.IGNORECASE)
-        if judge_section:
-            judge_text = judge_section.group(1)
-            judge_names = re.findall(
-                r'(?:HON\'BLE\s+)?(?:MR\.|MS\.|MRS\.)\s+(?:JUSTICE\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})',
-                judge_text, re.IGNORECASE
-            )
-            metadata["judges"] = [name.strip() for name in judge_names]
-        
-        # Date of hearing
-        hearing_date = re.search(r'Date\s+of\s+hearing:\s*(\d{2}\.\d{2}\.\d{4})', header)
+        # --- Date of hearing ---------------------------------------------
+        # Seen as "Date of hearing: 24.01.2023.", "Date of hearing 06-02-2023"
+        # and "Date of Hearing. 12-01-2023".
+        hearing_date = re.search(
+            r'Date\s+of\s+[Hh]earing\s*[:.]?\s*(\d{1,2}[.\-/]\d{1,2}[.\-/]\d{2,4})', header)
         if hearing_date:
             metadata["date_of_hearing"] = hearing_date.group(1)
         
@@ -468,6 +612,7 @@ def chunk_text(text: str, metadata: Dict,
                     "raw_text": chunk_data['raw_text'],
                     "doc_id": doc_metadata["doc_id"],
                     "case_no": doc_metadata.get("case_number", ""),
+                    "judgment_type": doc_metadata.get("judgment_type", ""),
                     "title": f"{doc_metadata['parties']['appellant']} v {doc_metadata['parties']['respondent']}" if doc_metadata['parties']['appellant'] else "",
                     "court": doc_metadata.get("court", ""),
                     "judges": doc_metadata.get("judges", []),
@@ -497,6 +642,7 @@ def chunk_text(text: str, metadata: Dict,
             "raw_text": chunk,
             "doc_id": metadata["doc_id"],
             "case_no": metadata.get("case_no", ""),
+            "judgment_type": "",
             "title": metadata.get("title", ""),
             "court": "",
             "judges": [],
@@ -520,8 +666,24 @@ class BM25Index:
         self.chunks_data = []
         self.tokenized_corpus = []
         
+    #: "Cr.P.C.", "C.P.C.", "P.T.R." and friends. Judgments write the dots;
+    #: users type "CrPC". Collapsing both sides makes them match.
+    _ABBREV_RE = re.compile(r'\b(?:[a-z]{1,2}\.){2,}[a-z]?\.?')
+
     def tokenize(self, text: str) -> List[str]:
-        return text.lower().split()
+        """Lowercase, collapse dotted abbreviations, split on non-alphanumerics.
+
+        A plain .lower().split() leaves punctuation stuck to words, so the
+        judgment's "497(5)" never equals a query's "497" and "Cr.P.C." never
+        equals "CrPC". Across the 49-judgment corpus that cost us: 497 matched
+        1 chunk instead of 11, and CrPC matched 0 instead of 44.
+
+        Used for both indexing and querying, so bm25.pkl must be rebuilt after
+        changing this.
+        """
+        lowered = text.lower()
+        collapsed = self._ABBREV_RE.sub(lambda m: m.group(0).replace('.', ''), lowered)
+        return [tok for tok in re.split(r'[^a-z0-9]+', collapsed) if tok]
     
     def build(self, chunks: List[Dict]):
         self.chunks_data = chunks
@@ -606,6 +768,7 @@ def index_pdfs():
             {
                 "doc_id": c["doc_id"],
                 "case_no": c["case_no"],
+                "judgment_type": c.get("judgment_type", ""),
                 "title": c["title"],
                 "court": c.get("court", ""),
                 "judges": json.dumps(c.get("judges", [])),
@@ -658,18 +821,22 @@ def search_hybrid(query: str, top_k=TOP_K_CHUNKS, alpha=HYBRID_ALPHA):
         n_results=top_k * 2,
         include=["documents", "metadatas", "distances"]
     )
-    
+
+    # Key every chunk by its index id, "<doc_id>_<chunk_id>". Every chunk of a judgment
+    # starts with the same "[Case: ...] [parties]" prefix, so keying on the first
+    # characters of the text merged a judgment's chunks into one and kept the wrong one.
     semantic_scores = {}
-    for doc, meta, dist in zip(
+    for cid, doc, meta, dist in zip(
+        semantic_results["ids"][0],
         semantic_results["documents"][0],
         semantic_results["metadatas"][0],
         semantic_results["distances"][0]
     ):
-        chunk_id = f"{meta['doc_id']}_{doc[:50]}"
-        semantic_scores[chunk_id] = {
+        num = cid.rpartition("_")[2]
+        semantic_scores[cid] = {
             "score": 1 - dist,
             "doc": doc,
-            "meta": meta
+            "meta": {**meta, "chunk_id": int(num) if num.isdigit() else None},
         }
     
     bm25_index = BM25Index(BM25_DIR)
@@ -686,13 +853,15 @@ def search_hybrid(query: str, top_k=TOP_K_CHUNKS, alpha=HYBRID_ALPHA):
             if max_bm25_score > 0:
                 for idx, score in bm25_results:
                     chunk_data = bm25_index.chunks_data[idx]
-                    chunk_id = f"{chunk_data['doc_id']}_{chunk_data['text'][:50]}"
+                    chunk_id = f"{chunk_data['doc_id']}_{chunk_data['chunk_id']}"
                     keyword_scores[chunk_id] = {
                         "score": score / max_bm25_score,
                         "doc": chunk_data["text"],
                         "meta": {
                             "doc_id": chunk_data["doc_id"],
+                            "chunk_id": chunk_data["chunk_id"],
                             "case_no": chunk_data["case_no"],
+                            "judgment_type": chunk_data.get("judgment_type", ""),
                             "title": chunk_data["title"],
                             # Carry the rest too, otherwise a keyword-only hit
                             # reaches the UI with no paragraph to cite.
@@ -779,6 +948,161 @@ def message_text(response) -> str:
 # ----------------------
 # SEARCH RESULT FORMATTING
 # ----------------------
+# A judgment's outcome sits in its closing paragraphs, and a search for the facts
+# often misses it. So each top hit also brings its neighbouring chunks, and the top
+# judgments bring their last chunks.
+CONTEXT_NEIGHBOUR_HITS = 5
+CONTEXT_CLOSING_DOCS = 3
+CONTEXT_CLOSING_CHUNKS = 2
+
+
+def add_context_chunks(hits: List[Dict]) -> List[Dict]:
+    """Return the hits plus the neighbouring and closing chunks of their judgments."""
+    cache: Dict[str, List[Dict]] = {}
+
+    def chunks_of(doc_id: str) -> List[Dict]:
+        if doc_id not in cache:
+            try:
+                chunks = json.loads((METADATA_DIR / f"{doc_id}.json").read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                chunks = []
+            cache[doc_id] = sorted(chunks, key=lambda c: c.get("chunk_id", 0))
+        return cache[doc_id]
+
+    out = list(hits)
+    # Identify chunks by chunk_id where the hit carries it; the text prefix is shared by
+    # every chunk of a judgment, so it is only a fallback (full text, not a prefix).
+    def key_of(doc_id, chunk_id, text):
+        return (doc_id, chunk_id) if chunk_id is not None else (doc_id, text)
+
+    seen = {key_of(h["meta"].get("doc_id"), h["meta"].get("chunk_id"), h["doc"]) for h in hits}
+
+    def add(doc_id: str, chunk: Dict, score: float) -> None:
+        key = key_of(doc_id, chunk.get("chunk_id"), chunk["text"])
+        if key in seen or (doc_id, chunk["text"]) in seen:
+            return
+        seen.add(key)
+        meta = {k: v for k, v in chunk.items() if k not in ("text", "raw_text")}
+        out.append({"score": score, "doc": chunk["text"], "meta": meta})
+
+    for hit in hits[:CONTEXT_NEIGHBOUR_HITS]:
+        doc_id = hit["meta"].get("doc_id", "")
+        chunks = chunks_of(doc_id)
+        cid = hit["meta"].get("chunk_id")
+        pos = next((i for i, c in enumerate(chunks)
+                    if (c.get("chunk_id") == cid if cid is not None else c["text"] == hit["doc"])), None)
+        if pos is None:
+            continue
+        for j in (pos - 1, pos + 1):
+            if 0 <= j < len(chunks):
+                add(doc_id, chunks[j], hit["score"])
+
+    closing_docs: List[str] = []
+    for hit in hits:
+        doc_id = hit["meta"].get("doc_id", "")
+        if doc_id and doc_id not in closing_docs:
+            closing_docs.append(doc_id)
+        if len(closing_docs) == CONTEXT_CLOSING_DOCS:
+            break
+    for doc_id in closing_docs:
+        for chunk in chunks_of(doc_id)[-CONTEXT_CLOSING_CHUNKS:]:
+            add(doc_id, chunk, 0.0)
+    return out
+
+
+# ----------------------
+# WHOLE-JUDGMENT CONTEXT (summarize / compare a chosen judgment)
+# ----------------------
+#: How much of one judgment goes into a prompt. Long judgments keep their opening and
+#: their end, where the parties, the question and the order are.
+JUDGMENT_CONTEXT_CHARS = 60000
+_DOC_ID_RE = re.compile(r"^[\w\-]+$")
+
+
+def load_judgment(doc_id: str) -> List[Dict]:
+    """All indexed chunks of one judgment, in order. Empty if it is not in the index."""
+    if not _DOC_ID_RE.match(doc_id or ""):
+        return []
+    try:
+        chunks = json.loads((METADATA_DIR / f"{doc_id}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return sorted(chunks, key=lambda c: c.get("chunk_id", 0))
+
+
+def judgment_hits(doc_id: str, max_chars: int = JUDGMENT_CONTEXT_CHARS) -> List[Dict]:
+    """A judgment's chunks shaped like search hits, trimmed to max_chars from the middle."""
+    chunks = load_judgment(doc_id)
+    if sum(len(c.get("text", "")) for c in chunks) > max_chars:
+        head, tail, used = [], [], 0
+        lo, hi = 0, len(chunks) - 1
+        while lo <= hi:
+            take_head = len(head) <= len(tail)
+            c = chunks[lo] if take_head else chunks[hi]
+            if used + len(c.get("text", "")) > max_chars:
+                break
+            used += len(c.get("text", ""))
+            if take_head:
+                head.append(c)
+                lo += 1
+            else:
+                tail.insert(0, c)
+                hi -= 1
+        chunks = head + tail
+    return [{"score": 1.0, "doc": c.get("text", ""),
+             "meta": {k: v for k, v in c.items() if k not in ("text", "raw_text")}}
+            for c in chunks]
+
+
+#: Uploaded documents are split into passages of about this size, at paragraph breaks.
+UPLOAD_PASSAGE_CHARS = 1500
+
+
+def document_hits(name: str, text: str, index: int, max_chars: int = JUDGMENT_CONTEXT_CHARS) -> List[Dict]:
+    """An uploaded document's text as passages shaped like search hits, so it can sit in a review
+    table next to indexed judgments. Nothing is stored or indexed."""
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text or "") if p.strip()]
+    passages, current = [], ""
+    for p in paragraphs:
+        if current and len(current) + len(p) > UPLOAD_PASSAGE_CHARS:
+            passages.append(current)
+            current = p
+        else:
+            current = (current + "\n\n" + p).strip()
+    if current:
+        passages.append(current)
+    # A document with no blank lines arrives as one paragraph; cut it at sentence ends.
+    split = []
+    for p in passages:
+        while len(p) > 2 * UPLOAD_PASSAGE_CHARS:
+            cut = p.rfind(". ", 0, UPLOAD_PASSAGE_CHARS) + 1 or UPLOAD_PASSAGE_CHARS
+            split.append(p[:cut].strip())
+            p = p[cut:].strip()
+        split.append(p)
+    kept, used = [], 0
+    for p in split:
+        if used + len(p) > max_chars:
+            break
+        kept.append(p)
+        used += len(p)
+    doc_id = f"upload-{index}"
+    return [{"score": 1.0, "doc": p,
+             "meta": {"doc_id": doc_id, "chunk_id": f"{doc_id}_{k}", "title": name, "case_no": "",
+                      "judgment_type": "", "court": "Your document", "paragraph_number": str(k),
+                      "section_type": ""}}
+            for k, p in enumerate(kept, 1)]
+
+
+def format_judgment_context(hits: List[Dict], start: int = 1) -> str:
+    """Full text of each chunk, numbered as [S<n>] from start, for whole-judgment prompts."""
+    parts = []
+    for i, hit in enumerate(hits, start):
+        para = hit["meta"].get("paragraph_number", "")
+        parts.append(f"Source {i} [S{i}]" + (f" (paragraph {para})" if para else "") +
+                     f"\n{clean_excerpt(hit['doc'])}")
+    return "\n\n".join(parts)
+
+
 def format_search_results(results: List[Dict]) -> str:
     """Render hybrid search hits as readable context for the LLM."""
     if not results:
@@ -881,6 +1205,7 @@ def source_records(hits: List[Dict]) -> List[Dict]:
             "n": i,
             "doc_id": meta.get("doc_id", ""),
             "case_no": meta.get("case_no", ""),
+            "judgment_type": meta.get("judgment_type", ""),
             "court": meta.get("court", "").replace("\n", " ").strip(),
             "title": meta.get("title", ""),
             "paragraph": str(meta.get("paragraph_number", "") or ""),
@@ -890,6 +1215,10 @@ def source_records(hits: List[Dict]) -> List[Dict]:
             "provisions": [p.replace("\n", " ") for p in _as_list(meta.get("provisions"), [])][:5],
             "parties": parties if isinstance(parties, dict) else {},
             "score": round(float(hit.get("score", 0.0)), 3),
+            # How each half of hybrid search rated the passage. Absent for passages
+            # added only for context (neighbouring or closing paragraphs).
+            "semantic": round(float(hit["semantic_score"]), 3) if "semantic_score" in hit else None,
+            "keyword": round(float(hit["keyword_score"]), 3) if "keyword_score" in hit else None,
             "excerpt": clean_excerpt(hit.get("doc", "")),
         })
     return records
@@ -962,6 +1291,8 @@ CLASSIFICATION RULES:
 EXAMPLES:
     "Retrieve past corruption cases in Pakistan"
         -> GQ, restated_query: "Retrieve past corruption cases in Pakistan"
+    "میری گاڑی پولیس نے لے لی ہے، واپس کیسے ملے گی؟"
+        -> GQ, restated_query: "Release of a vehicle seized by police on superdari"
     "Summarize the Lahore High Court judgment on property dispute"
         -> SQ, restated_query: "Summarize the Lahore High Court judgment on property dispute"
     "Compare GDPR with CCPA"
@@ -996,7 +1327,17 @@ EXAMPLES (Follow-up / Context-aware queries):
     "And the Lahore High Court judgment?"
         -> SQ, restated_query: "Summarize the Lahore High Court judgment mentioned in prior conversation"
 
+EXAMPLES (Urdu / Roman Urdu input, restated in English):
+    "دفعہ 497 ضابطہ فوجداری کے تحت ضمانت کے مقدمات دکھائیں"
+        -> GQ, restated_query: "Find bail cases under Section 497 CrPC"
+    "497 CrPC ke tehat bail ke cases dikhao"
+        -> GQ, restated_query: "Find bail cases under Section 497 CrPC"
+
 RULES:
+    - The restated query is used to search English-language judgments. Always write it, and
+      `compare_a` and `compare_b`, in English, even if the user wrote in Urdu, Roman Urdu or
+      another language, translating legal terms to their English equivalents (for example,
+      a seized vehicle released on superdari).
     - Keep the restated query close to what the user asked (fix only obvious grammar issues).
     - Use the chat history to clarify references in follow-up questions.
 
@@ -1017,7 +1358,8 @@ Reply with exactly one of:
   <answer><valid>[CQ] restated query</valid></answer>   (compare request)
   <answer>clarifying message</answer>                   (not legal, or too broad)
 
-No extra text outside the tags.
+No extra text outside the tags. Write the restated query in English, translating
+Urdu or Roman Urdu input.
 
 Chat history:
 {history}
@@ -1030,6 +1372,79 @@ Input Query:
 #: so the UI and evaluation can detect an honest refusal rather than guess at it.
 NOT_FOUND_PHRASE = "Not found in the indexed judgments"
 
+ANSWER_RECHECK = (
+    "\n\nBefore you reply \"Not found in the indexed judgments.\", read every excerpt again. "
+    "If any excerpt states a rule or an outcome that bears on the question, answer from it "
+    "and say what it does not cover.\n"
+)
+
+# ----------------------
+# ANSWER MODES & LANGUAGES
+# ----------------------
+#: Who the answer is written for. Citizen is the default because it matches how the
+#: answer prompt behaved before modes existed.
+MODES = ("citizen", "lawyer")
+DEFAULT_MODE = "citizen"
+
+#: Output language. Retrieval always runs in English (the judgments are in English);
+#: only the final answer is written in the chosen language.
+LANGUAGES = ("en", "ur", "roman_ur")
+DEFAULT_LANGUAGE = "en"
+
+MODE_INSTRUCTIONS = {
+    "citizen": """\
+- The reader is a member of the public, not a lawyer. Use plain, everyday words.
+- Explain any legal term the first time it appears, in one short phrase.
+- Keep it short: the answer first, then only the detail needed to understand it.
+- End with a short "What this means for you" part giving practical next steps, such as
+  documents to keep or questions to ask a lawyer. Mention that the free legal aid committee
+  of the local bar association can help people who cannot afford a lawyer.
+- Finish with one sentence saying this is general information, not legal advice.""",
+    "lawyer": """\
+- The reader is a practising lawyer. Be precise and concise; use legal terminology without
+  explaining it.
+- Lead with the holding or ratio, then the material facts, then how the court applied the law.
+- Name statutory provisions with section numbers and give case citations exactly as they
+  appear in the excerpts.
+- Say so when an excerpt is from an interim order or order sheet rather than a final judgment.""",
+}
+
+LANGUAGE_INSTRUCTIONS = {
+    "en": "- Write the answer in English.",
+    "ur": """\
+- Write the answer in Urdu, in Urdu script.
+- Keep case numbers, citations (e.g. 2016 SCMR 2073), section numbers (e.g. Section 497 CrPC),
+  court names and party names in English exactly as written in the source.
+- Use the standard legal Urdu used in Pakistani courts, e.g. ضمانت (bail), ملزم (accused),
+  فیصلہ (judgment), عدالت (court), اپیل (appeal), ایف آئی آر (FIR).""",
+    "roman_ur": """\
+- Write the answer in Roman Urdu: Urdu written in English letters, the way Pakistanis
+  write in text messages (e.g. "Adalat ne zamanat manzoor kar li").
+- Keep case numbers, citations, section numbers, court names and party names in English
+  exactly as written in the source.""",
+}
+
+
+def style_instructions(mode: str = DEFAULT_MODE, language: str = DEFAULT_LANGUAGE) -> str:
+    """Audience and language rules for the answer and summary prompts.
+
+    Unknown values fall back to the defaults, so a bad value from the UI never breaks a turn.
+    """
+    mode = mode if mode in MODE_INSTRUCTIONS else DEFAULT_MODE
+    language = language if language in LANGUAGE_INSTRUCTIONS else DEFAULT_LANGUAGE
+    rules = [MODE_INSTRUCTIONS[mode], LANGUAGE_INSTRUCTIONS[language]]
+    if language != "en":
+        # The UI and evaluation detect citations and refusals by their exact English form.
+        rules.append(
+            "- Everything you write is in the chosen language, including headings, next steps\n"
+            "  and the closing note. Translate any heading named in these instructions.\n"
+            "- Only two things stay in English: source markers such as [S1], exactly as written,\n"
+            f'  and, if you cannot answer, the sentence "{NOT_FOUND_PHRASE}." The\n'
+            "  suggestion that follows it is in the chosen language."
+        )
+    return "\n".join(rules)
+
+
 ANSWER_PROMPT = PromptTemplate.from_template(
     """
 You are a Legal AI assistant specializing in Pakistani case law. Answer the user's question using
@@ -1038,12 +1453,18 @@ only the retrieved excerpts below.
 Instructions:
 - Ground every statement in the excerpts. Do not invent cases, citations, judges or provisions.
 - Cite the excerpt you rely on as [S<n>], using the Source number shown against it, for example
-  [S1] or [S3]. Cite after the sentence it supports. Add the court and paragraph number in
-  words where it reads naturally.
-- If the excerpts do not answer the question, reply with exactly this sentence and nothing else:
+  [S1] or [S3]. Cite after the sentence it supports. Put each source in its own brackets:
+  write [S2][S3], never [S2, S3]. Add the court and paragraph number in words where it
+  reads naturally.
+- Answer from the excerpts whenever they bear on the question, even partly, and say plainly what
+  they do not cover.
+- Reply with exactly this sentence and nothing else only when no excerpt bears on the question:
   "Not found in the indexed judgments." Then suggest, on a new line, how to narrow the search.
   Never fill the gap with outside knowledge.
-- Write for a reader who is not a lawyer, but keep the legal meaning exact.
+- Keep the legal meaning exact, whoever the reader is.
+
+Audience and language:
+{style}
 
 Question:
 {query}
@@ -1075,20 +1496,25 @@ Examples:
 - Similarity: Both judgments cited previous decisions on procedural requirements for appeals.
 - Difference: Case 1 considered mitigating circumstances, whereas Case 2 did not.
 
-Output Format:
-- Divide output into two sections: SIMILARITIES and DIFFERENCES
-- Each entry should include:
-    1. Heading: Short title summarizing the topic (e.g., "Penalties", "Precedent", "Legal Reasoning")
-    2. Explanation: Brief explanation of the similarity or difference
-    3. doc1_line: Quote or reference from document 1
-    4. doc2_line: Quote or reference from document 2
+Output Format (Markdown, so the app can show it as a table):
+- Start with "## At a glance": one or two sentences on how the two cases relate.
+- Then "## Side by side": a Markdown table with the columns
+  | Aspect | <short name of case 1> | <short name of case 2> |
+  and one row each for: Court and case number, Parties, Legal question, Provisions applied,
+  Outcome. Write "Not stated" where the excerpts do not say.
+- Then "## Similarities" and "## Differences", each a bullet list. Start each bullet with a
+  short bold heading (e.g. **Penalties**, **Precedent**, **Legal reasoning**), then the
+  explanation, quoting or referencing each document where possible.
+- These four sections together cover the SIMILARITIES and DIFFERENCES of the two documents.
 - Return the output directly, without introductory text or commentary.
 
 Analyze:
 - Read both documents carefully.
 - Extract every relevant similarity and difference according to the above rules.
 - Avoid assumptions; rely only on what is explicitly or logically supported in the documents.
-- Return the structured but readable output directly.
+
+Audience and language:
+{style}
 
 DOCS are:
 doc1
@@ -1101,24 +1527,399 @@ doc2
 
 SUMMARIZE_PROMPT = PromptTemplate.from_template(
     """
-You are a legal analyst and educator. Your task is to summarize the following legal document in **clear, simple, layman-friendly language** while preserving the **exact legal meaning and context**.
+You are a legal analyst and educator. Your task is to summarize the following legal document while preserving the **exact legal meaning and context**.
 
 Instructions:
-- Simplify complex legal jargon without losing key obligations, rights, or compliance requirements.
 - Keep the structure logical and easy to read.
 - Retain any critical definitions, terms, deadlines, or requirements.
-- Highlight practical implications for a layperson.
 - Avoid skipping any sections with important legal content.
 
-Output Format:
-- Use numbered points or short paragraphs.
-- Each point should convey one main idea.
+Audience and language:
+{style}
+
+Output Format (Markdown, so the app can show each part as its own section):
+- Use these headings in this order: "## In brief" (two or three sentences), "## Facts",
+  "## Issues", "## Arguments", "## Decision", "## Why it matters". Leave out a heading
+  only if the document says nothing on it.
+- Under each heading use short paragraphs or bullet points, one main idea each.
 - Include any deadlines, obligations, or conditions explicitly.
+- If the text holds excerpts from more than one judgment, summarize the one most
+  relevant to the request and name it in "In brief".
+- Cite the excerpt each point relies on as [S<n>], using the Source number shown against
+  it, one source per bracket.
 
 Document to summarize:
 {text}
 """
 )
+
+EXPLAIN_PROMPT = PromptTemplate.from_template(
+    """
+You are a Legal AI assistant for Pakistani law. A person has uploaded one of their own legal
+documents (for example an FIR, a legal notice, a summons or a court order) and wants to
+understand it.
+
+Instructions:
+- Use only the document text and the judgment excerpts below. Do not invent facts, dates,
+  sections, penalties or cases.
+- For each law the document names, give its common meaning only if you are certain of it
+  (for example "Section 489-F PPC: dishonestly issuing a cheque that bounces"); otherwise
+  write "meaning not stated in the document".
+- Excerpts are from other people's cases. Use them only to show how courts have handled
+  similar situations, citing them as [S<n>], one source per bracket. Never present them as
+  being about this document.
+
+Output Format (Markdown):
+- "## What this document is": its type, who issued it, to whom, and any date or reference
+  number it gives.
+- "## What it says": the key points in plain words.
+- "## Red flags and deadlines": one bullet per thing in the document that the reader must act
+  on or should worry about: a demand, a deadline, a threatened consequence, an admission, a
+  missing detail, or an unusual term. Start each bullet with **High**, **Medium** or **Low**
+  for how serious it is for the reader, in English and in bold, then the issue, quoting the
+  document's words. Put High first. If there are none, write "None found."
+- "## Laws it mentions": one bullet per section or article.
+- "## Similar judgments": what the excerpts show about comparable cases, or say that none
+  of them is comparable.
+- "## What to do next": practical next steps, including any deadline the document sets.
+
+Audience and language:
+{style}
+
+Document text:
+{document}
+
+Judgment excerpts:
+{context}
+"""
+)
+
+def _unique_provisions(found: List[str]) -> List[str]:
+    """"section\\n497(5)" and "Section 497(5)" are one provision; keep the longest wording."""
+    best: Dict[str, str] = {}
+    for p in found:
+        p = re.sub(r"\s+", " ", p).strip()
+        key = re.sub(r"[^a-z0-9()]", "", p.lower().replace("section", "s").replace("article", "a"))
+        if key and len(p) > len(best.get(key, "")):
+            best[key] = p
+    return sorted(best.values(), key=len, reverse=True)
+
+
+_LEGAL_WORDS = re.compile(r"\b(bail|fir|accused|complainant|offence|cheque|custody|notice|petition|"
+                          r"appeal|decree|order|sentence|convict\w*|acquit\w*|arrest\w*|eviction|"
+                          r"maintenance|dowry|property|tenant|summons|warrant|penalty|compromise)\b", re.I)
+
+
+#: Urdu legal words and their English search terms, for finding English judgments from an
+#: Urdu document. Deterministic: no model call.
+_URDU_TERMS = {
+    "چیک": "cheque dishonoured", "ضمانت": "bail", "قرض": "loan", "حراست": "custody", "تحویل": "custody",
+    "نفقہ": "maintenance", "خرچہ": "maintenance", "طلاق": "divorce talaq", "خلع": "khula dissolution of marriage",
+    "حق مہر": "dower", "جہیز": "dowry", "کرایہ دار": "tenant", "بے دخلی": "eviction", "قتل": "murder qatl",
+    "چوری": "theft", "ڈکیتی": "robbery dacoity", "جائیداد": "property", "زمین": "land", "گاڑی": "vehicle superdari",
+    "وراثت": "inheritance", "نابالغ": "minor", "دھوکہ": "cheating fraud", "اغوا": "abduction", "منشیات": "narcotics",
+}
+_URDU_LETTERS = {"ایف": "F", "اے": "A", "بی": "B", "سی": "C", "ڈی": "D", "ای": "E"}
+_URDU_LAWS = [("تعزیرات پاکستان", "PPC"), ("ضابطہ فوجداری", "CrPC"), ("ضابطہ دیوانی", "CPC")]
+
+
+def urdu_search_terms(text: str) -> str:
+    """English search terms for a document written mostly in Urdu script, or "" for one that isn't."""
+    letters = re.findall(r"[^\W\d_]", text or "")
+    if not letters or sum("\u0600" <= c <= "\u06ff" for c in letters) < 0.3 * len(letters):
+        return ""
+    terms = []
+    # "دفعہ 489-ایف تعزیرات پاکستان" -> "section 489-F PPC"
+    for m in re.finditer(r"دفعہ\s*(\d{1,3})(?:\s*-\s*(ایف|اے|بی|سی|ڈی|ای))?([^۔\n]{0,40})", text):
+        law = next((code for urdu, code in _URDU_LAWS if urdu in m.group(3)), "")
+        terms.append(f"section {m.group(1)}" + (f"-{_URDU_LETTERS[m.group(2)]}" if m.group(2) else "") + (f" {law}" if law else ""))
+    terms += [english for urdu, english in _URDU_TERMS.items() if urdu in text]
+    return " ".join(dict.fromkeys(terms))
+
+
+def _key_sentences(text: str, provisions: List[str], n: int = 3) -> List[str]:
+    """The sentences that carry the most legal substance, for a similar-judgments search."""
+    sentences = [s.strip() for s in re.split(r"(?<=[.?!])\s+", re.sub(r"\s+", " ", text)) if 40 <= len(s.strip()) <= 400]
+    def weight(s):
+        return len(_LEGAL_WORDS.findall(s)) + 2 * sum(p.lower() in s.lower() for p in provisions)
+    return sorted(sentences, key=weight, reverse=True)[:n]
+
+
+#: Document types the Draft page can produce: (title, what the document must contain).
+#: The structures describe standard Pakistani practice; review them before relying on a draft.
+DRAFT_KINDS = {
+    "reply_to_notice": (
+        "Reply to a legal notice",
+        "A heading 'Reply to Legal Notice'; To, From, Date and Subject lines referring to the notice "
+        "being answered; numbered paragraphs answering each demand in the notice; the sender's own "
+        "position; a closing that reserves all rights and remedies; a signature block."),
+    "bail_application": (
+        "Post-arrest bail application (section 497 Cr.P.C.)",
+        "The court it is filed in; the title 'Application for post-arrest bail under section 497 "
+        "Cr.P.C.'; the parties (the applicant versus The State); the FIR particulars (number, date, "
+        "police station, offences); numbered grounds for bail; a prayer; signature of counsel; a "
+        "verification placeholder."),
+    "cheque_notice": (
+        "Legal notice for a dishonoured cheque",
+        "Sender and recipient; the facts in date order (the transaction, the cheque number, bank and "
+        "date, its dishonour); a demand to pay within the stated number of days; the consequence of "
+        "not paying (a criminal complaint under section 489-F PPC and a civil suit for recovery); a "
+        "signature block."),
+    "fir_application": (
+        "Application to the SHO to register an FIR (section 154 Cr.P.C.)",
+        "Addressed to the SHO of the police station; a subject line; the complainant's details; the "
+        "facts in date order; a request to register an FIR and investigate; signature, CNIC and "
+        "contact placeholders."),
+    "superdari": (
+        "Application for release of a seized vehicle on superdari",
+        "The magistrate's court; the title of the application; the applicant; the vehicle's "
+        "particulars; the seizure (police station, date, and the provision if stated); the ownership "
+        "documents relied on; numbered grounds; an undertaking to produce the vehicle whenever the "
+        "court requires; a prayer."),
+}
+
+DRAFT_PROMPT = PromptTemplate.from_template(
+    """
+You are drafting a Pakistani legal document for the user to review with an advocate.
+
+Document: {title}
+It must contain: {structure}
+
+Rules:
+- Use only the facts provided below. Where a fact is missing, write a placeholder in square
+  brackets such as [date of notice]. Never invent names, dates, amounts, numbers or addresses.
+- Formal legal style with numbered paragraphs.
+- Name a statutory provision only if it appears in the facts, in "It must contain" above, or
+  in the judgment excerpts.
+- After the document, add "## Supporting judgments": up to three bullets on how the judgment
+  excerpts relate to this situation, citing them as [S<n>], one source per bracket. If none
+  is relevant, say so. Do not cite excerpts inside the document itself.
+- End with the line: "Draft for review by an advocate. Not legal advice."
+{sample}
+Audience and language:
+{style}
+
+Facts provided:
+{facts}
+
+Judgment excerpts:
+{context}
+"""
+)
+
+HEARING_PROMPT = PromptTemplate.from_template(
+    """
+You are helping a person and their advocate prepare for a court hearing in Pakistan, using only
+the user's facts and the judgment excerpts below.
+
+Rules:
+- Work only from the user's facts and the excerpts. Do not invent cases, holdings or facts.
+- Cite each excerpt you rely on as [S<n>], one source per bracket. Square brackets are only
+  for these citations: when a point comes from the user's own facts, write "(from your facts)"
+  in round brackets, never in square ones.
+- Do not predict the outcome or give odds.
+
+Output Format (Markdown), with these headings in order:
+- "## The hearing": what the court will decide at this hearing, in one or two sentences.
+- "## Questions the bench may ask": numbered, 5 to 8 questions a judge is likely to ask on these
+  facts. Under each, "Suggested answer:" drawn from the facts and, where one supports it, a
+  cited excerpt. Where the facts do not give an answer, say what the person must find out.
+- "## Points to make first": the three strongest points, each cited where possible.
+- "## Documents to bring": a checklist.
+- "## If the court is not persuaded": the narrower order to ask for instead, cited where possible.
+
+Audience and language:
+{style}
+
+The user's facts:
+{facts}
+
+Judgment excerpts:
+{context}
+"""
+)
+
+CHRONOLOGY_PROMPT = PromptTemplate.from_template(
+    """
+You are building a chronology (a dated timeline of events) for a Pakistani legal matter from the
+text below. The text is either the user's own documents and account, or the excerpts of one
+judgment numbered [S1], [S2] and so on.
+
+Rules:
+- Use only dates and events that the text states. Never guess a date. If an event has no date
+  but its order is clear, put "Date not stated" and place it in order.
+- For each event, quote the few words of the text that give the date, in quotation marks.
+- If the text is judgment excerpts, cite the excerpt for each row as [S<n>], one per bracket.
+  Otherwise write no square brackets at all.
+- Keep each event to one short sentence.
+
+Output Format (Markdown):
+- "## Chronology": a table with the columns | Date | Event | Where it says so |, earliest first.
+- "## Gaps and time limits": bullets on long gaps between steps, steps whose date is missing,
+  and any period the law may limit (for example time to appeal or to file a suit). Say the time
+  limit must be checked on the Calculate page or with an advocate; do not state a limitation
+  period yourself unless the text states it.
+
+Audience and language:
+{style}
+
+Notes from the user:
+{facts}
+
+Text:
+{context}
+"""
+)
+
+CLIENT_LETTER_PROMPT = PromptTemplate.from_template(
+    """
+You are an advocate in Pakistan writing a short update letter to a client about their case, from
+the notes below. The client is not a lawyer.
+
+Rules:
+- Use only the facts in the notes. Where something the letter needs is missing, write a
+  placeholder in square brackets such as [next hearing date]. Never invent dates, names,
+  amounts or orders of the court.
+- Plain words, short paragraphs, no Latin and no legal jargon without explaining it.
+- Do not promise or predict an outcome.
+
+Structure: a greeting; "What happened" (what the court did and what it means); "What happens
+next" (the next date and what the court will consider); "What we need from you" (a short list);
+a closing that invites the client to call with questions; a signature placeholder.
+End with the line: "Draft for review by the advocate before sending."
+
+Audience and language:
+{style}
+
+Notes:
+{facts}
+{context}
+"""
+)
+
+#: How much of the user's style sample the drafting prompt sees.
+STYLE_SAMPLE_CHARS = 6000
+
+
+def style_sample_block(sample: str) -> str:
+    """The prompt rules for drafting in the style of the user's own document, or nothing."""
+    sample = (sample or "").strip()[:STYLE_SAMPLE_CHARS]
+    if not sample:
+        return ""
+    return (
+        "- Follow the layout and voice of the user's style sample below: its headings, salutation,\n"
+        "  paragraph numbering, closing and level of formality. Take nothing else from it: no names,\n"
+        "  dates, amounts, addresses, case numbers or facts. Every fact comes from \"Facts provided\".\n\n"
+        "User's style sample (layout and tone only):\n<<<\n" + sample + "\n>>>\n")
+
+
+STRATEGY_PROMPT = PromptTemplate.from_template(
+    """
+You are preparing a case strategy memo for a person and their advocate, using only the
+judgment excerpts below.
+
+Rules:
+- Work only from the user's facts and the excerpts. Do not invent cases, holdings or facts.
+- Cite each excerpt you rely on as [S<n>], one source per bracket. Square brackets are only
+  for these citations: when a point comes from the user's own facts, write "(from your facts)"
+  in round brackets, never in square ones.
+- Do not predict the outcome of this case or give odds. Describe how courts have reasoned in
+  similar cases, and what helps or hurts this person's position.
+
+Output Format (Markdown), with these headings in order:
+- "## The question": the legal issue in one or two sentences.
+- "## Similar judgments": one bullet per relevant judgment: what it decided and whether it
+  helps or hurts this person, cited.
+- "## Arguments for your side": numbered, each tied to a cited excerpt where one supports it.
+- "## Arguments the other side will make": numbered, cited where possible.
+- "## Weak points and missing facts": what the facts given do not establish, and what
+  evidence would help.
+- "## Next steps": practical steps for the person and their advocate.
+
+Audience and language:
+{style}
+
+The user's facts:
+{facts}
+
+Judgment excerpts:
+{context}
+"""
+)
+
+#: Named multi-step tasks: kind -> (title, prompt, how the context is found).
+#: "search" finds similar judgments; "judgment" reads one judgment in full when a doc_id is
+#: given (and otherwise works from the user's own text); "none" works from the notes alone.
+WORKFLOWS = {
+    "strategy": ("Case strategy memo", STRATEGY_PROMPT, "search"),
+    "hearing": ("Hearing preparation", HEARING_PROMPT, "search"),
+    "chronology": ("Chronology", CHRONOLOGY_PROMPT, "judgment"),
+    "client_letter": ("Client update letter", CLIENT_LETTER_PROMPT, "none"),
+}
+
+DOCUMENT_QA_PROMPT = PromptTemplate.from_template(
+    """
+Answer the user's question about their own legal document, using only the document text below.
+
+Rules:
+- Quote the words of the document that support the answer.
+- If the document does not answer the question, say so plainly and suggest what to ask a lawyer.
+- Do not add facts, dates or legal consequences that the document does not state.
+
+Audience and language:
+{style}
+
+Question:
+{question}
+
+Document text:
+{document}
+"""
+)
+
+REVIEW_PROMPT = PromptTemplate.from_template(
+    """
+You are filling one row of a review table about a Pakistani court judgment or legal document.
+
+For each column below, answer in at most 25 words using only the excerpts, and give the Source
+number of the excerpt that supports the answer. If the excerpts do not say, answer
+"Not stated" with source 0. Each answer is a table cell: no headings, no advice and no
+"What this means for you" notes, and no [S] markers in the text (the number goes in "source").
+
+Return only a JSON object, with no other text, in exactly this shape:
+{{"<column name>": {{"answer": "...", "source": <number>}}, ...}}
+
+Columns:
+{columns}
+
+Audience and language:
+{style}
+
+Excerpts:
+{context}
+"""
+)
+
+TABLE_QA_PROMPT = PromptTemplate.from_template(
+    """
+Answer the question using only the review table below, which compares Pakistani judgments.
+Each cell cites the excerpt it came from as [S<n>]; keep those citations in your answer, one
+source per bracket. If the table does not answer the question, say so.
+
+Audience and language:
+{style}
+
+Question:
+{question}
+
+Review table:
+{table}
+"""
+)
+
+#: Shown when an upload is not a legal document. The check runs before anything else.
+NOT_LEGAL_DOCUMENT = ("This does not look like a Pakistani legal document. Upload an FIR, a legal "
+                      "notice, a summons or a court order, or paste its text.")
 
 
 # ----------------------
@@ -1150,6 +1951,8 @@ class WakeelState(TypedDict):
     doc2: str
     sources: List[Dict]
     answer: str
+    mode: str        # one of MODES: who the answer is written for
+    language: str    # one of LANGUAGES: what language the answer is written in
 
 
 def _render_history(messages: List[AnyMessage], limit: int = 6) -> str:
@@ -1179,12 +1982,17 @@ def is_unretryable_api_error(exc: Exception) -> bool:
 def _api_error_message(exc: Exception) -> str:
     """A short, human-readable reason instead of a wall of JSON."""
     text = str(exc)
+    label = PROVIDERS[LLM_PROVIDER]["label"]
     if "RESOURCE_EXHAUSTED" in text or "429" in text:
+        if LLM_PROVIDER == "openai":
+            return ("The OpenAI API refused the request: the account's quota or credit is used "
+                    "up, or it hit its rate limit. Check billing at platform.openai.com, or "
+                    "wait a minute and try again.")
         return ("The Gemini API quota for this key is exhausted. The free tier allows "
                 "a limited number of requests per day; wait for the quota to reset or "
                 "enable billing. (Set WAKEEL_MODEL to try a different model.)")
     if any(m in text for m in ("PERMISSION_DENIED", "UNAUTHENTICATED", "401", "403", "API key")):
-        return "The Gemini API rejected the API key. Check GOOGLE_API_KEY in your .env file."
+        return f"The {label} API rejected the API key. Check {API_KEY_ENV} in your .env file."
     if "NOT_FOUND" in text or "404" in text:
         return (f"The configured model is not available to this API key. "
                 f"Set WAKEEL_MODEL to a model you can access (current: {LLM_MODEL}).")
@@ -1217,7 +2025,7 @@ class WakeelAgent:
         self.llm = llm
         self.thread_id = thread_id
         try:
-            self.classifier = llm.with_structured_output(QueryClassification)
+            self.classifier = structured(llm, QueryClassification)
         except Exception as e:
             print(f"[warn] structured output unavailable, using tag parsing: {e}")
             self.classifier = None
@@ -1288,14 +2096,16 @@ Output Instructions:
                 return "Could not find one or both documents. Please check document IDs."
 
             return message_text(self.llm.invoke(COMPARE_PROMPT.format(
-                doc1=doc1_results[0]['doc'], doc2=doc2_results[0]['doc'])))
+                doc1=doc1_results[0]['doc'], doc2=doc2_results[0]['doc'],
+                style=style_instructions())))
         except Exception as e:
             return f"Error comparing documents: {str(e)}"
 
     def summarize_text(self, text: str) -> str:
         """Summarize the given text."""
         try:
-            return message_text(self.llm.invoke(SUMMARIZE_PROMPT.format(text=text)))
+            return message_text(self.llm.invoke(
+                SUMMARIZE_PROMPT.format(text=text, style=style_instructions())))
         except Exception as e:
             return f"Error summarizing text: {str(e)}"
 
@@ -1366,7 +2176,8 @@ Output Instructions:
             hits = search_hybrid(query, top_k=TOP_K_CHUNKS, alpha=HYBRID_ALPHA)
         except Exception as e:
             return {"context": f"Error performing RAG search: {e}", "sources": []}
-        _trace(f"retrieved {len(hits)} chunks")
+        hits = add_context_chunks(hits)
+        _trace(f"retrieved {len(hits)} chunks, with context")
         return {"context": format_search_results(hits), "sources": source_records(hits)}
 
     def retrieve_pair_node(self, state: WakeelState) -> Dict:
@@ -1394,22 +2205,41 @@ Output Instructions:
         }
 
     def answer_node(self, state: WakeelState) -> Dict:
+        prompt = ANSWER_PROMPT.format(
+            query=state.get("restated_query") or state["query"],
+            context=state["context"],
+            style=style_instructions(state.get("mode"), state.get("language")),
+        )
         try:
-            answer = message_text(self.llm.invoke(
-                ANSWER_PROMPT.format(
-                    query=state.get("restated_query") or state["query"],
-                    context=state["context"],
-                )
-            ))
+            answer = message_text(self.llm.invoke(prompt))
+            # Excerpts were retrieved, yet the model said "not found". Look once more.
+            if state.get("sources") and NOT_FOUND_PHRASE.lower() in answer.lower():
+                answer = self._recheck(prompt, answer)
         except Exception as e:
-            answer = _api_error_message(e)
+            return self._failed(e)
         return {"answer": answer, "messages": [AIMessage(content=answer)]}
+
+    @staticmethod
+    def _failed(e: Exception) -> Dict:
+        """A model failure while writing: reported as ERROR, never as a grounded answer."""
+        answer = _api_error_message(e)
+        return {"answer": answer, "route": "ERROR", "messages": [AIMessage(content=answer)]}
+
+    def _recheck(self, prompt: str, first_answer: str) -> str:
+        """Ask once more with an explicit instruction to check each excerpt. Keep the first answer on failure."""
+        try:
+            return message_text(self.llm.invoke(prompt + ANSWER_RECHECK))
+        except Exception:
+            return first_answer
 
     def summarize_node(self, state: WakeelState) -> Dict:
         try:
-            answer = message_text(self.llm.invoke(SUMMARIZE_PROMPT.format(text=state["context"])))
+            answer = message_text(self.llm.invoke(SUMMARIZE_PROMPT.format(
+                text=state["context"],
+                style=style_instructions(state.get("mode"), state.get("language")),
+            )))
         except Exception as e:
-            answer = _api_error_message(e)
+            return self._failed(e)
         return {"answer": answer, "messages": [AIMessage(content=answer)]}
 
     def compare_node(self, state: WakeelState) -> Dict:
@@ -1425,9 +2255,12 @@ Output Instructions:
             return {"answer": context, "messages": [AIMessage(content=context)]}
 
         try:
-            answer = message_text(self.llm.invoke(COMPARE_PROMPT.format(doc1=doc1, doc2=doc2)))
+            answer = message_text(self.llm.invoke(COMPARE_PROMPT.format(
+                doc1=doc1, doc2=doc2,
+                style=style_instructions(state.get("mode"), state.get("language")),
+            )))
         except Exception as e:
-            answer = _api_error_message(e)
+            return self._failed(e)
         return {"answer": answer, "messages": [AIMessage(content=answer)]}
 
     # ===== Edges =====
@@ -1477,44 +2310,402 @@ Output Instructions:
 
         return builder
 
+    # ===== Chosen-judgment tasks (Summarize and Compare pages) =====
+
+    @staticmethod
+    def _missing(doc_ids) -> Dict:
+        return {"answer": f"Not in the index: {', '.join(doc_ids)}.", "route": "ERROR",
+                "restated_query": "", "sources": [], "grounded": False}
+
+    def summarize_judgment(self, doc_id: str, mode: str = DEFAULT_MODE,
+                           language: str = DEFAULT_LANGUAGE) -> Dict:
+        """Summarize one whole judgment, chosen by the user rather than found by search."""
+        hits = judgment_hits(doc_id)
+        if not hits:
+            return self._missing([doc_id])
+        try:
+            answer = message_text(self.llm.invoke(SUMMARIZE_PROMPT.format(
+                text=format_judgment_context(hits), style=style_instructions(mode, language))))
+        except Exception as e:
+            return {**self._missing([]), "answer": _api_error_message(e)}
+        return {"answer": answer, "route": "SQ", "restated_query": "",
+                "sources": source_records(hits), "grounded": True}
+
+    def compare_judgments(self, doc_a: str, doc_b: str, mode: str = DEFAULT_MODE,
+                          language: str = DEFAULT_LANGUAGE) -> Dict:
+        """Compare two whole judgments chosen by the user."""
+        half = JUDGMENT_CONTEXT_CHARS // 2
+        hits_a, hits_b = judgment_hits(doc_a, half), judgment_hits(doc_b, half)
+        missing = [d for d, h in ((doc_a, hits_a), (doc_b, hits_b)) if not h]
+        if missing:
+            return self._missing(missing)
+        try:
+            answer = message_text(self.llm.invoke(COMPARE_PROMPT.format(
+                doc1=format_judgment_context(hits_a),
+                doc2=format_judgment_context(hits_b, start=len(hits_a) + 1),
+                style=style_instructions(mode, language))))
+        except Exception as e:
+            return {**self._missing([]), "answer": _api_error_message(e)}
+        return {"answer": answer, "route": "CQ", "restated_query": "",
+                "sources": source_records(hits_a + hits_b), "grounded": True}
+
+    # ===== Explain an uploaded document (Explain page) =====
+
+    #: Enough of a long document to explain it; the rest rarely changes the answer.
+    DOCUMENT_CHARS = 20000
+
+    def transcribe_images(self, images: List[Tuple[str, bytes]]) -> str:
+        """Read the text of photographed or scanned pages with the chat model itself."""
+        import base64
+        content = [{"type": "text", "text": (
+            "Transcribe all the text in these document pages exactly, in reading order. "
+            "Keep Urdu text in Urdu script. Output only the text.")}]
+        for mime, data in images:
+            content.append({"type": "image_url", "image_url": {
+                "url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"}})
+        return message_text(self.llm.invoke([HumanMessage(content=content)]))
+
+    def explain_document(self, text: str = "", images: Optional[List[Tuple[str, bytes]]] = None,
+                         mode: str = DEFAULT_MODE, language: str = DEFAULT_LANGUAGE) -> Dict:
+        """Explain a user's own legal document and find similar judgments.
+
+        The document is used for this answer only: it is never written to disk or indexed.
+        """
+        failed = {"route": "ERROR", "restated_query": "", "sources": [], "grounded": False}
+        try:
+            if images and len((text or "").strip()) < 200:
+                text = self.transcribe_images(images)
+        except Exception as e:
+            return {**failed, "answer": _api_error_message(e)}
+        text = (text or "").strip()[:self.DOCUMENT_CHARS]
+        if not text:
+            return {**failed, "answer": "No readable text was found in this file."}
+        if not self.is_legal_document(text):
+            return {**failed, "route": "REJECT", "answer": NOT_LEGAL_DOCUMENT}
+
+        # Similar judgments: search on the provisions the document names and its most
+        # substantive sentences. Its opening is usually a header (court, counsel, dates),
+        # which matches other judgments' headers rather than their substance.
+        provisions = _unique_provisions(PakistaniCourtJudgmentChunker().extract_legal_provisions(text))
+        query = " ".join(provisions[:6] + _key_sentences(text, provisions))
+        # The judgments are in English; an Urdu document searches with its English legal terms.
+        query = (urdu_search_terms(text) + " " + query).strip()
+        try:
+            hits = search_hybrid(query, top_k=6)
+        except Exception:
+            hits = []
+        try:
+            answer = message_text(self.llm.invoke(EXPLAIN_PROMPT.format(
+                document=text,
+                context=format_search_results(hits) if hits else "(no judgments found)",
+                style=style_instructions(mode, language))))
+        except Exception as e:
+            return {**failed, "answer": _api_error_message(e)}
+        # The text goes back to the user's own browser so follow-up questions can send it again;
+        # it is not kept on the server.
+        return {"answer": answer, "route": "DOC", "restated_query": query.strip(),
+                "sources": source_records(hits), "grounded": bool(hits),
+                "provisions": provisions, "document_chars": len(text), "document_text": text}
+
+    def ask_document(self, text: str, question: str, mode: str = DEFAULT_MODE,
+                     language: str = DEFAULT_LANGUAGE) -> Dict:
+        """Answer a follow-up question about a document the user already uploaded."""
+        failed = {"route": "ERROR", "restated_query": "", "sources": [], "grounded": False}
+        text, question = (text or "").strip()[:self.DOCUMENT_CHARS], (question or "").strip()
+        if not text or not question:
+            return {**failed, "answer": "Upload a document and ask a question about it."}
+        try:
+            answer = message_text(self.llm.invoke(DOCUMENT_QA_PROMPT.format(
+                question=question, document=text, style=style_instructions(mode, language))))
+        except Exception as e:
+            return {**failed, "answer": _api_error_message(e)}
+        return {"answer": answer, "route": "DOC", "restated_query": question, "sources": [], "grounded": True}
+
+    def summarize_document(self, text: str = "", images: Optional[List[Tuple[str, bytes]]] = None,
+                           mode: str = DEFAULT_MODE, language: str = DEFAULT_LANGUAGE) -> Dict:
+        """A brief of a judgment the user uploads, rather than one from the library."""
+        failed = {"route": "ERROR", "restated_query": "", "sources": [], "grounded": False}
+        try:
+            if images and len((text or "").strip()) < 200:
+                text = self.transcribe_images(images)
+            text = (text or "").strip()[:JUDGMENT_CONTEXT_CHARS]
+            if not text:
+                return {**failed, "answer": "No readable text was found in this file."}
+            answer = message_text(self.llm.invoke(SUMMARIZE_PROMPT.format(
+                text=text, style=style_instructions(mode, language))))
+        except Exception as e:
+            return {**failed, "answer": _api_error_message(e)}
+        return {"answer": answer, "route": "SQ", "restated_query": "", "sources": [], "grounded": True}
+
+    # ===== Review table: many judgments x chosen columns (Compare page) =====
+
+    REVIEW_MAX_DOCS = 8
+    REVIEW_MAX_COLUMNS = 6
+    REVIEW_DOC_CHARS = 24000
+
+    @staticmethod
+    def _parse_row(raw: str, columns: List[str], first: int, last: int) -> List[Dict]:
+        """The model's JSON row as cells, in column order. Bad or missing cells say so."""
+        try:
+            data = json.loads(raw[raw.index("{"): raw.rindex("}") + 1])
+        except ValueError:
+            data = {}
+        lower = {str(k).strip().lower(): v for k, v in data.items()} if isinstance(data, dict) else {}
+        cells = []
+        for col in columns:
+            v = lower.get(col.lower(), {})
+            text = str(v.get("answer", "") if isinstance(v, dict) else v or "").strip()
+            # The citation belongs in "source"; a marker written into the text as well is moved there.
+            markers = [int(m) for m in re.findall(r"\[S(\d+)\]", text)]
+            text = re.sub(r"\s*\[S\d+(?:\s*[,;]\s*S?\d+)*\]", "", text).strip()
+            text = re.sub(r"\s+([.,;:])", r"\1", text)[:300] or "Not stated"
+            try:
+                n = int(v.get("source", 0)) if isinstance(v, dict) else 0
+            except (TypeError, ValueError):
+                n = 0
+            if not first <= n <= last and markers:
+                n = markers[0]
+            cells.append({"text": text, "source": n if first <= n <= last else None})
+        return cells
+
+    def review_table(self, doc_ids: List[str], columns: List[str], mode: str = DEFAULT_MODE,
+                     language: str = DEFAULT_LANGUAGE, documents: Optional[List[Dict]] = None) -> Dict:
+        """Fill a documents x columns table, each cell citing the passage it came from.
+
+        Rows are indexed judgments (doc_ids) and/or the user's own documents, given as
+        {"name", "text"} and read in memory only.
+        """
+        from concurrent.futures import ThreadPoolExecutor
+        failed = {"route": "ERROR", "restated_query": "", "sources": [], "grounded": False}
+        doc_ids = [d for d in dict.fromkeys(doc_ids or []) if isinstance(d, str)][:self.REVIEW_MAX_DOCS]
+        documents = [d for d in (documents or []) if (d.get("text") or "").strip()]
+        documents = documents[:self.REVIEW_MAX_DOCS - len(doc_ids)]
+        columns = list(dict.fromkeys(str(c).strip()[:80] for c in (columns or []) if str(c).strip()))[:self.REVIEW_MAX_COLUMNS]
+        if not (doc_ids or documents) or not columns:
+            return {**failed, "answer": "Choose at least one judgment or document, and one column."}
+
+        # Number passages across the whole table, so every cell's citation is unique.
+        plans, start = [], 1
+        for d in doc_ids:
+            hits = judgment_hits(d, self.REVIEW_DOC_CHARS)
+            if not hits:
+                return self._missing([d])
+            plans.append((d, hits, start))
+            start += len(hits)
+        for i, doc in enumerate(documents, 1):
+            hits = document_hits(str(doc.get("name") or f"Document {i}")[:120], doc["text"], i, self.REVIEW_DOC_CHARS)
+            plans.append((hits[0]["meta"]["doc_id"], hits, start))
+            start += len(hits)
+        column_list = "\n".join(f"- {c}" for c in columns)
+        style = style_instructions(mode, language)
+
+        def fill(plan):
+            d, hits, first = plan
+            try:
+                raw = message_text(self.llm.invoke(REVIEW_PROMPT.format(
+                    columns=column_list, style=style, context=format_judgment_context(hits, start=first))))
+                return self._parse_row(raw, columns, first, first + len(hits) - 1), None
+            except Exception as e:
+                return [{"text": "Could not be read", "source": None} for _ in columns], e
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            filled = list(pool.map(fill, plans))
+        errors = [e for _, e in filled if e]
+        if len(errors) == len(filled):
+            return {**failed, "answer": _api_error_message(errors[0])}
+
+        all_hits = [h for _, hits, _ in plans for h in hits]
+        sources = source_records(all_hits)
+        rows = []
+        for (d, hits, _), (cells, _) in zip(plans, filled):
+            row = {"doc_id": d, "cells": cells}
+            if d.startswith("upload-"):
+                row["name"] = hits[0]["meta"]["title"]
+            rows.append(row)
+        # A Markdown copy of the table, for copying, PDF and follow-up questions.
+        head = "| Document | " + " | ".join(columns) + " |\n|" + "---|" * (len(columns) + 1)
+        lines = []
+        for row, (d, hits, _) in zip(rows, plans):
+            meta = hits[0]["meta"]
+            name = row.get("name") or f"{meta.get('judgment_type', '')} {meta.get('case_no', '')}".strip() or d
+            cells = [c["text"].replace("|", "/") + (f" [S{c['source']}]" if c["source"] else "") for c in row["cells"]]
+            lines.append(f"| {name} | " + " | ".join(cells) + " |")
+        return {"answer": head + "\n" + "\n".join(lines), "route": "TABLE", "restated_query": "",
+                "columns": columns, "rows": rows, "sources": sources, "grounded": True}
+
+    def ask_table(self, question: str, table: str, mode: str = DEFAULT_MODE,
+                  language: str = DEFAULT_LANGUAGE) -> Dict:
+        """Answer a question over a review table the user already built."""
+        failed = {"route": "ERROR", "restated_query": "", "sources": [], "grounded": False}
+        if not (question or "").strip() or not (table or "").strip():
+            return {**failed, "answer": "Build a table and ask a question about it."}
+        try:
+            answer = message_text(self.llm.invoke(TABLE_QA_PROMPT.format(
+                question=question.strip()[:1000], table=table[:20000], style=style_instructions(mode, language))))
+        except Exception as e:
+            return {**failed, "answer": _api_error_message(e)}
+        return {"answer": answer, "route": "TABLE", "restated_query": question, "sources": [], "grounded": True}
+
+    # ===== Case strategy memo (Draft page) =====
+
+    def strategy_memo(self, facts: Dict[str, str], mode: str = DEFAULT_MODE,
+                      language: str = DEFAULT_LANGUAGE) -> Dict:
+        """Arguments for and against, from similar judgments. Never predicts the outcome."""
+        return self.run_workflow("strategy", facts, mode=mode, language=language)
+
+    def run_workflow(self, kind: str, facts: Dict[str, str], mode: str = DEFAULT_MODE,
+                     language: str = DEFAULT_LANGUAGE, doc_id: str = "") -> Dict:
+        """One of WORKFLOWS: research what it needs, then write it, citing what it used."""
+        failed = {"route": "ERROR", "restated_query": "", "sources": [], "grounded": False}
+        if kind not in WORKFLOWS:
+            return {**failed, "answer": "Choose a workflow."}
+        title, prompt, finds = WORKFLOWS[kind]
+        given = [(str(k).strip()[:80], str(v).strip()[:6000]) for k, v in (facts or {}).items() if str(v).strip()]
+        if not given and not (finds == "judgment" and doc_id):
+            return {**failed, "answer": "Describe your situation first."}
+        query = " ".join(v for _, v in given)[:800]
+        hits, context = [], ""
+        if finds == "search":
+            try:
+                hits = add_context_chunks(search_hybrid(query, top_k=8))
+            except Exception:
+                hits = []
+            context = format_search_results(hits) if hits else "(no judgments found)"
+        elif finds == "judgment":
+            if doc_id:
+                hits = judgment_hits(doc_id)
+                if not hits:
+                    return self._missing([doc_id])
+                context = format_judgment_context(hits)
+            else:
+                context = "\n\n".join(v for _, v in given)   # the user's own documents are the text
+        try:
+            answer = message_text(self.llm.invoke(prompt.format(
+                facts="\n".join(f"- {k}: {v}" for k, v in given) or "(none)",
+                context=context, style=style_instructions(mode, language))))
+        except Exception as e:
+            return {**failed, "answer": _api_error_message(e)}
+        return {"answer": answer, "route": kind.upper(), "restated_query": query or title,
+                "sources": source_records(hits), "grounded": bool(hits)}
+
+    # ===== Draft a document (Draft page) =====
+
+    def draft_document(self, kind: str, facts: Dict[str, str], mode: str = DEFAULT_MODE,
+                       language: str = DEFAULT_LANGUAGE, sample: str = "") -> Dict:
+        """Draft a document of a known kind from the user's facts, with supporting judgments.
+
+        sample: optionally, one of the user's own documents; the draft follows its layout and
+        tone but takes nothing else from it.
+        """
+        failed = {"route": "ERROR", "restated_query": "", "sources": [], "grounded": False}
+        if kind not in DRAFT_KINDS:
+            return {**failed, "answer": "Choose a document type."}
+        title, structure = DRAFT_KINDS[kind]
+        given = [(str(k).strip()[:80], str(v).strip()[:2000]) for k, v in (facts or {}).items() if str(v).strip()]
+        facts_text = "\n".join(f"- {k}: {v}" for k, v in given) or "(none provided)"
+        query = title + " " + " ".join(v for _, v in given)[:600]
+        try:
+            hits = search_hybrid(query, top_k=5)
+        except Exception:
+            hits = []
+        try:
+            answer = message_text(self.llm.invoke(DRAFT_PROMPT.format(
+                title=title, structure=structure, facts=facts_text,
+                context=format_search_results(hits) if hits else "(no judgments found)",
+                style=style_instructions(mode, language), sample=style_sample_block(sample))))
+        except Exception as e:
+            return {**failed, "answer": _api_error_message(e)}
+        return {"answer": answer, "route": "DRAFT", "restated_query": query,
+                "sources": source_records(hits), "grounded": bool(hits)}
+
     # ===== Public API =====
 
     def run(self, query: str, thread_id: Optional[str] = None) -> str:
         """Run one turn. Conversation memory is keyed by thread_id."""
         return self.run_detailed(query, thread_id)["answer"]
 
-    def run_detailed(self, query: str, thread_id: Optional[str] = None) -> Dict:
-        """Run one turn and report which branch of the graph handled it."""
+    @staticmethod
+    def _initial_state(query: str, mode: str, language: str) -> Dict:
+        return {
+            "messages": [HumanMessage(content=query)],
+            "query": query,
+            "route": "",
+            "restated_query": "",
+            "compare_a": "",
+            "compare_b": "",
+            "context": "",
+            "doc1": "",
+            "doc2": "",
+            "sources": [],
+            "answer": "",
+            "mode": mode,
+            "language": language,
+        }
+
+    @staticmethod
+    def _result(final_state: Dict) -> Dict:
+        answer = final_state.get("answer", "") or "No answer produced."
+        route = final_state.get("route", "") or "UNKNOWN"
+        sources = [] if route == "ERROR" else (final_state.get("sources") or [])
+        return {
+            "answer": answer,
+            "route": route,
+            "restated_query": final_state.get("restated_query", ""),
+            "sources": sources,
+            "grounded": bool(sources) and NOT_FOUND_PHRASE.lower() not in answer.lower(),
+        }
+
+    @staticmethod
+    def _error_result(e: Exception) -> Dict:
+        return {"answer": f"Error processing query: {str(e)}", "route": "ERROR",
+                "restated_query": "", "sources": [], "grounded": False}
+
+    @staticmethod
+    def _step_event(node: str, update: Dict) -> Dict:
+        """What the UI shows when a graph node finishes."""
+        event = {"type": "step", "node": node}
+        if node == "classify":
+            event.update(route=update.get("route", ""),
+                         restated_query=update.get("restated_query", ""),
+                         compare_a=update.get("compare_a", ""),
+                         compare_b=update.get("compare_b", ""))
+        elif node in ("retrieve", "retrieve_pair"):
+            sources = update.get("sources") or []
+            event.update(passages=len(sources),
+                         judgments=len({s.get("doc_id") for s in sources if s.get("doc_id")}))
+        elif update.get("route") == "ERROR":
+            event["route"] = "ERROR"   # the model failed while writing
+        return event
+
+    def run_detailed(self, query: str, thread_id: Optional[str] = None,
+                     mode: str = DEFAULT_MODE, language: str = DEFAULT_LANGUAGE) -> Dict:
+        """Run one turn and report which branch of the graph handled it.
+
+        mode and language shape only the final answer; they are passed every turn, so the
+        user can switch them mid-conversation.
+        """
         config = {"configurable": {"thread_id": thread_id or self.thread_id}}
         try:
-            final_state = self.graph.invoke(
-                {
-                    "messages": [HumanMessage(content=query)],
-                    "query": query,
-                    "route": "",
-                    "restated_query": "",
-                    "compare_a": "",
-                    "compare_b": "",
-                    "context": "",
-                    "doc1": "",
-                    "doc2": "",
-                    "sources": [],
-                    "answer": "",
-                },
-                config=config,
-            )
-            answer = final_state.get("answer", "") or "No answer produced."
-            sources = final_state.get("sources") or []
-            return {
-                "answer": answer,
-                "route": final_state.get("route", "") or "UNKNOWN",
-                "restated_query": final_state.get("restated_query", ""),
-                "sources": sources,
-                "grounded": bool(sources) and NOT_FOUND_PHRASE.lower() not in answer.lower(),
-            }
+            final_state = self.graph.invoke(self._initial_state(query, mode, language), config=config)
+            return self._result(final_state)
         except Exception as e:
-            return {"answer": f"Error processing query: {str(e)}", "route": "ERROR",
-                    "restated_query": "", "sources": [], "grounded": False}
+            return self._error_result(e)
+
+    def run_stream(self, query: str, thread_id: Optional[str] = None,
+                   mode: str = DEFAULT_MODE, language: str = DEFAULT_LANGUAGE):
+        """Like run_detailed, but yield a "step" event as each graph node finishes.
+
+        The last event is always {"type": "result", ...} with the same fields as run_detailed.
+        """
+        config = {"configurable": {"thread_id": thread_id or self.thread_id}}
+        try:
+            for update in self.graph.stream(self._initial_state(query, mode, language),
+                                            config=config, stream_mode="updates"):
+                for node, delta in update.items():
+                    yield self._step_event(node, delta or {})
+            yield {"type": "result", **self._result(self.graph.get_state(config).values)}
+        except Exception as e:
+            yield {"type": "result", **self._error_result(e)}
 
 
 # =====================================================
@@ -1530,16 +2721,10 @@ if __name__ == "__main__":
     print("\nChecking for documents to index...")
     index_pdfs()
 
-    # Initialize Gemini LLM
+    # Initialize the chat model (WAKEEL_PROVIDER picks Gemini or OpenAI)
     require_api_key()
-    print("\nInitializing Gemini AI model...")
-    llm = ChatGoogleGenerativeAI(
-        model=LLM_MODEL,
-        temperature=0.3,
-        max_tokens=None,
-        timeout=None,
-        max_retries=2,
-    )
+    print(f"\nInitializing {PROVIDERS[LLM_PROVIDER]['label']} model {LLM_MODEL}...")
+    llm = make_chat_model(temperature=0.3)
 
     # Initialize Agent
     print("Initializing Wakeel agent (LangGraph)...")
@@ -1559,7 +2744,7 @@ if __name__ == "__main__":
     print("  - Search by legal provisions (Section 302 PPC)")
     print("  - Extract judge names, parties, and precedents")
     print("  - Intelligent chunking for court judgments")
-    print(f"\nPowered by: Google {LLM_MODEL} on LangGraph")
+    print(f"\nPowered by: {PROVIDERS[LLM_PROVIDER]['label']} {LLM_MODEL} on LangGraph")
     print("="*60)
 
     # Interactive loop

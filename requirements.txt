@@ -4,6 +4,7 @@
 langgraph>=1.2,<2.0
 langchain-core>=1.6,<2.0
 langchain-google-genai>=4.4,<5.0
+langchain-openai>=1.0,<2.0   # only used when WAKEEL_PROVIDER=openai
 langchain-text-splitters>=1.1,<2.0
 pydantic>=2.7,<3.0
 
