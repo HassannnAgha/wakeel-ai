@@ -394,6 +394,32 @@ PAGE = r"""<!doctype html>
   .airec td i { font-style: normal; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; background: var(--black); color: var(--white); padding: 0 4px; }
   .airec td i.rules { background: transparent; color: var(--black); border: 1px solid var(--black); }
 
+  .gloss { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: help;
+           text-decoration: underline dotted; text-decoration-thickness: 1.5px; text-underline-offset: 3px; text-decoration-color: currentColor; }
+  .gloss:hover, .gloss:focus-visible { background: rgba(216,205,185,.45); outline: none; }
+  .gpop { position: fixed; z-index: 70; background: var(--white); color: var(--ink); border: 1px solid var(--black);
+          box-shadow: 6px 6px 0 rgba(10,10,10,.85); padding: 14px 16px 12px; font-size: 14px; animation: arrive .25s ease-out both; }
+  .gpop .gw { display: block; font: 700 20px var(--display); letter-spacing: .03em; text-transform: uppercase; margin-bottom: 4px; }
+  .gpop p { margin: 0 0 8px; line-height: 1.5; }
+  .gpop .gur { font-size: 16px; line-height: 1.8; color: var(--rock); border-top: 1px solid var(--line); padding-top: 6px; }
+  .gpop blockquote { margin: 0 0 6px; padding: 7px 10px; background: var(--beige); border-left: 3px solid var(--black); font-size: 12.5px; color: var(--rock); }
+  .gpop .statref { font-size: 12.5px; color: var(--deep); }
+  .gpop small { display: block; margin-top: 8px; font-size: 11px; color: var(--muted); }
+
+  .auto { position: fixed; left: 0; right: 0; bottom: 0; z-index: 80; background: var(--black); color: var(--white);
+          box-shadow: 0 -8px 30px rgba(0,0,0,.25); }
+  .auto-bar { height: 3px; background: #1c1c1c; }
+  .auto-bar i { display: block; height: 100%; background: var(--marker); transition: width .6s; }
+  .auto-in { display: flex; align-items: center; gap: 18px; padding: 14px 24px; max-width: 1400px; margin: 0 auto; }
+  .auto-n { font: 700 14px var(--display); letter-spacing: .1em; color: var(--marker); white-space: nowrap; }
+  .auto-in p { flex: 1; margin: 0; font-size: 17px; line-height: 1.45; animation: arrive .4s ease-out both; }
+  .auto-keys { display: flex; gap: 6px; }
+  .auto-keys button { color: var(--muted-dark); border: 1px solid var(--line-dark); padding: 5px 10px; font-size: 11px;
+                      letter-spacing: .1em; text-transform: uppercase; }
+  .auto-keys button:hover { color: var(--white); border-color: var(--marker); }
+  body.auto-on { padding-bottom: 72px; }
+  @media (max-width: 760px) { .auto-in { flex-wrap: wrap; gap: 8px; padding: 10px 14px; } .auto-in p { flex-basis: 100%; order: 3; font-size: 14px; } }
+
   /* ---------- home ---------- */
   .home { display: grid; grid-template-columns: 1.35fr 1fr; min-height: calc(100vh - 56px);
           background: var(--slate); padding: 32px; }
@@ -1391,6 +1417,12 @@ print(draft["answer"])</pre>
     </div>
   </div>
 
+  <div class="auto" id="auto" hidden role="status" aria-live="polite">
+    <div class="auto-bar"><i id="auto-prog"></i></div>
+    <div class="auto-in"><span class="auto-n" id="auto-n"></span><p id="auto-cap"></p>
+      <div class="auto-keys"><button type="button" id="auto-pause">Pause</button><button type="button" id="auto-next">Next</button><button type="button" id="auto-stop">Stop</button></div></div>
+  </div>
+
   <section data-page="workspace">
     <div class="ws">
       <aside class="ws-side">
@@ -1581,7 +1613,8 @@ print(draft["answer"])</pre>
       <h2 class="display">Team</h2>
       <p class="team"><b>Agha Ali Hassan</b> and <b>Warda Fatima</b>, FAST-NUCES Lahore, BS Computer Science.</p>
       <div class="ctas" style="margin:22px 0 10px">
-        <button type="button" class="btn" id="pitch-tour">Take the 90-second tour</button>
+        <button type="button" class="btn" id="pitch-auto">Play the demo (autopilot)</button>
+        <button type="button" class="btn line" id="pitch-tour">Take the 90-second tour</button>
         <a href="/ask" data-link class="btn line">Ask a question</a>
         <a href="/developers" data-link class="btn line">For developers</a>
       </div>
@@ -2708,6 +2741,186 @@ function helpStrip() {
     '</div><p>Checked October 2026. These lines are run by the services named, not by Wakeel.</p>';
   return box;
 }
+// ---- Legal words, explained: tap a marked word for its meaning in English and Urdu and the law behind it.
+// The meanings are fixed text written for this app (not AI); the law is the official text we hold.
+// cs: case-sensitive patterns (acronyms); ci: any case. The longer form comes first where two overlap.
+const GLOSSARY = [
+  {id: 'noncog', ci: ['non-cognizable offen[cs]e', 'non-cognizable case', 'non-cognizable'], law: 'crpc:155',
+   en: 'An offence the police may not investigate, or arrest for, without a magistrate’s order.',
+   ur: 'ایسا جرم جس میں پولیس مجسٹریٹ کے حکم کے بغیر نہ تفتیش کر سکتی ہے نہ گرفتاری۔'},
+  {id: 'cog', ci: ['cognizable offen[cs]e', 'cognizable case'], urp: ['قابلِ? دست اندازی'], law: 'crpc:4', find: 'cognizable offence” means',
+   en: 'An offence for which the police may arrest without a warrant.',
+   ur: 'ایسا جرم جس میں پولیس وارنٹ کے بغیر گرفتار کر سکتی ہے۔'},
+  {id: 'fir', cs: ['FIRs?', 'F\\.I\\.R\\.?'], ci: ['first information report'], urp: ['ایف آئی آر'], law: 'crpc:154',
+   en: 'First Information Report: the police’s written record of a cognizable offence. It starts the investigation.',
+   ur: 'ابتدائی اطلاعاتی رپورٹ: کسی قابلِ دست اندازی جرم کی پولیس میں درج تحریری رپورٹ، جس سے تفتیش شروع ہوتی ہے۔'},
+  {id: 'superdari', ci: ['superdari', 'supurdari', 'supurdgi'], urp: ['سپرداری'], law: 'crpc:516A',
+   en: 'Temporary custody of seized property, such as a vehicle, given to its owner by a court until the case is decided.',
+   ur: 'ضبط شدہ مال، جیسے گاڑی، کی عارضی حوالگی جو عدالت مقدمے کے فیصلے تک مالک کو دیتی ہے۔'},
+  {id: 'challan', ci: ['challans?'], urp: ['چالان'], law: 'crpc:173',
+   en: 'The police report sent to court when the investigation is finished, so the trial can begin.',
+   ur: 'تفتیش مکمل ہونے پر پولیس کی عدالت میں بھیجی گئی رپورٹ، تاکہ مقدمہ شروع ہو سکے۔'},
+  {id: 'prearrest', ci: ['pre-arrest bail', 'bail before arrest', 'ad-interim pre-arrest bail'], urp: ['ضمانت قبل از گرفتاری'], law: 'crpc:498',
+   en: 'A court order, made before any arrest, that you are to be released on bail if you are arrested.',
+   ur: 'گرفتاری سے پہلے عدالت کا حکم کہ گرفتاری کی صورت میں آپ کو ضمانت پر رہا کیا جائے۔'},
+  {id: 'postarrest', ci: ['post-arrest bail', 'bail after arrest'], urp: ['ضمانت بعد از گرفتاری'], law: 'crpc:497',
+   en: 'Release on bail from custody after an arrest.',
+   ur: 'گرفتاری کے بعد ضمانت پر حراست سے رہائی۔'},
+  {id: 'nonbail', ci: ['non-bailable offen[cs]es?', 'non-bailable'], law: 'crpc:497',
+   en: 'An offence in which bail is up to the court, not a right.',
+   ur: 'ایسا جرم جس میں ضمانت حق نہیں بلکہ عدالت کی صوابدید ہے۔'},
+  {id: 'bailable', ci: ['bailable offen[cs]es?'], law: 'crpc:496',
+   en: 'An offence in which bail is a right: you must be released when you offer bail.',
+   ur: 'ایسا جرم جس میں ضمانت حق ہے: ضمانت دینے پر رہائی لازم ہے۔'},
+  {id: 'prohibitory', ci: ['prohibitory clause'], law: 'crpc:497',
+   en: 'The part of section 497 CrPC under which bail is normally refused for offences punishable with death, life imprisonment or ten years.',
+   ur: 'دفعہ 497 کا وہ حصہ جس کے تحت موت، عمر قید یا دس سال سزا والے جرائم میں عام طور پر ضمانت نہیں دی جاتی۔'},
+  {id: 'remand', ci: ['physical remand', 'judicial remand', 'remand'], urp: ['ریمانڈ'], law: 'crpc:167',
+   en: 'A magistrate’s order keeping an arrested person in police custody (physical remand) or in jail (judicial remand) beyond 24 hours.',
+   ur: 'مجسٹریٹ کا حکم جس سے گرفتار شخص کو چوبیس گھنٹے سے زیادہ پولیس (جسمانی ریمانڈ) یا جیل (جوڈیشل ریمانڈ) میں رکھا جاتا ہے۔'},
+  {id: 'warrant', ci: ['warrants? of arrest', 'arrest warrants?'], law: 'crpc:75',
+   en: 'A written court order telling the police to arrest a named person.',
+   ur: 'عدالت کا تحریری حکم جس میں پولیس کو کسی شخص کو گرفتار کرنے کا کہا جاتا ہے۔'},
+  {id: 'summons', ci: ['summons'], law: 'crpc:68',
+   en: 'A court order to appear before it on a fixed date.',
+   ur: 'عدالت کا حکم کہ مقررہ تاریخ پر حاضر ہوں۔'},
+  {id: 'writ', ci: ['writ petitions?', 'constitutional petitions?'], urp: ['رٹ پٹیشن'], law: 'const:199',
+   en: 'A petition to the High Court under Article 199 of the Constitution, against an unlawful act or order of a public body.',
+   ur: 'آئین کے آرٹیکل 199 کے تحت ہائی کورٹ میں درخواست، کسی سرکاری ادارے کے غیر قانونی اقدام یا حکم کے خلاف۔'},
+  {id: 'quash', ci: ['quashment', 'quashing', 'quashed', 'quash'], law: 'crpc:561A',
+   en: 'When the High Court ends criminal proceedings, or an FIR, using its inherent power.',
+   ur: 'جب ہائی کورٹ اپنے موروثی اختیار سے فوجداری کارروائی یا ایف آئی آر ختم کر دے۔'},
+  {id: 'compound', ci: ['compoundable', 'compounding', 'compounded'], law: 'crpc:345',
+   en: 'Settling an offence between the parties so the case ends; allowed only for the offences listed in section 345 CrPC.',
+   ur: 'فریقین کے درمیان صلح سے مقدمہ ختم کرنا؛ صرف دفعہ 345 میں درج جرائم میں جائز ہے۔'},
+  {id: 'khula', ci: ['khula'], urp: ['خلع'], law: 'fca:10', find: 'khula',
+   en: 'Dissolution of the marriage at the wife’s request, decreed by the Family Court.',
+   ur: 'بیوی کی درخواست پر فیملی کورٹ کے ذریعے نکاح کی تنسیخ۔'},
+  {id: 'maintenance', ci: ['maintenance', 'nafqa', 'nan nafqa'], urp: ['نان نفقہ'], law: 'mflo:9',
+   en: 'Money a husband must pay to support his wife, and a father his children.',
+   ur: 'وہ خرچہ جو شوہر بیوی کے، اور والد بچوں کے، گزارے کے لیے دینے کا پابند ہے۔'},
+  {id: 'custody', ci: ['custody of (?:the |a )?minors?', 'custody of (?:the |a )?child(?:ren)?', 'hizanat'], urp: ['حضانت'], law: 'gwa:25',
+   en: 'The right to keep and bring up a child. The Guardian Court decides it by what is best for the child.',
+   ur: 'بچے کو اپنے پاس رکھنے اور پرورش کا حق۔ گارڈین کورٹ بچے کی بہتری دیکھ کر فیصلہ کرتی ہے۔'},
+  {id: 'decree', ci: ['decree'], law: 'cpc:2', find: 'decree” means',
+   en: 'The formal order that records a civil court’s final decision.',
+   ur: 'دیوانی عدالت کے حتمی فیصلے کا باضابطہ حکم۔'},
+  {id: 'vakalat', ci: ['vakalatnama', 'wakalatnama', 'power of attorney for the advocate'], urp: ['وکالت نامہ'],
+   en: 'The signed paper that authorises an advocate to act for you in court.',
+   ur: 'وہ دستخط شدہ کاغذ جس سے آپ وکیل کو عدالت میں اپنی نمائندگی کا اختیار دیتے ہیں۔'},
+  {id: 'causelist', ci: ['cause lists?'],
+   en: 'The court’s list of the cases it will hear on a given day.',
+   ur: 'عدالت کی فہرست جس میں کسی دن سنے جانے والے مقدمات درج ہوتے ہیں۔'},
+  {id: 'exparte', ci: ['ex[ -]parte'],
+   en: 'Heard or decided in the absence of one side, usually because they did not appear.',
+   ur: 'ایک فریق کی غیر حاضری میں سماعت یا فیصلہ۔'},
+  {id: 'acquittal', ci: ['acquittal', 'acquitted'],
+   en: 'A court’s finding that the accused is not guilty.',
+   ur: 'عدالت کا فیصلہ کہ ملزم بے قصور ہے۔'},
+  {id: 'mensrea', ci: ['mens rea'],
+   en: 'The guilty intention most crimes require, such as dishonesty.',
+   ur: 'مجرمانہ نیت، جیسے بددیانتی، جو اکثر جرائم کے لیے ضروری ہے۔'},
+  {id: 'limitation', ci: ['period of limitation', 'barred by limitation', 'time-barred', 'time barred'],
+   en: 'The time limit the law sets for filing a case. A case filed late can be dismissed for that alone.',
+   ur: 'مقدمہ دائر کرنے کی قانونی مدت۔ دیر سے دائر مقدمہ صرف اسی وجہ سے خارج ہو سکتا ہے۔'},
+];
+let GLOSS_RES = null;
+function glossRes() {
+  if (GLOSS_RES) return GLOSS_RES;
+  const L = '(?<![A-Za-z])', R = '(?![A-Za-z])';
+  GLOSS_RES = GLOSSARY.map(g => {
+    const parts = [];
+    if (g.ci) parts.push(new RegExp(L + '(?:' + g.ci.join('|') + ')' + R, 'gi'));
+    if (g.cs) parts.push(new RegExp(L + '(?:' + g.cs.join('|') + ')' + R, 'g'));
+    if (g.urp) parts.push(new RegExp('(?:' + g.urp.join('|') + ')', 'g'));
+    return {g, parts};
+  });
+  return GLOSS_RES;
+}
+// The earliest legal word in text not yet used: {id, index, length}. A longer match wins a tie.
+function glossFind(text, used) {
+  let best = null;
+  glossRes().forEach(({g, parts}) => {
+    if (used.has(g.id)) return;
+    parts.forEach(re => {
+      re.lastIndex = 0;
+      const m = re.exec(text);
+      if (m && (!best || m.index < best.index || (m.index === best.index && m[0].length > best.length))) best = {id: g.id, index: m.index, length: m[0].length};
+    });
+  });
+  return best;
+}
+function glossMatches(text) {
+  const used = new Set(), out = [];
+  let rest = String(text || ''), offset = 0, f;
+  while ((f = glossFind(rest, used))) {
+    out.push({id: f.id, index: offset + f.index, text: rest.substr(f.index, f.length)});
+    used.add(f.id);
+    offset += f.index + f.length; rest = rest.slice(f.index + f.length);
+  }
+  return out;
+}
+// Mark the first time each legal word appears in an answer or a judgment, leaving citations and buttons alone.
+function glossify(root) {
+  if (!root) return;
+  const used = new Set();
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {acceptNode: n =>
+    n.parentElement.closest('button, a, code, sup, .cite, .gloss, .statref, .citeref, table thead') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT});
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  nodes.forEach(node => {
+    let cur = node, f;
+    while (cur && (f = glossFind(cur.nodeValue, used))) {
+      used.add(f.id);
+      const word = cur.splitText(f.index), after = word.splitText(f.length);
+      const b = el('button', 'gloss');
+      b.type = 'button'; b.dataset.g = f.id; b.textContent = word.nodeValue;
+      b.title = 'What this means';
+      word.replaceWith(b);
+      cur = after;
+    }
+  });
+}
+function glossLaw(g) {
+  const v = g.law && STATUTES[g.law];
+  if (!v) return '';
+  let t = v.text, at = g.find ? t.toLowerCase().indexOf(g.find.toLowerCase()) : 0;
+  if (at < 0) at = 0;
+  t = t.slice(Math.max(0, at - (g.find ? 20 : 0)));
+  return (at > 20 ? '…' : '') + (t.length > 260 ? t.slice(0, 257).replace(/\s+\S*$/, '') + '…' : t);
+}
+function openGloss(btn) {
+  closeGloss();
+  const g = GLOSSARY.find(x => x.id === btn.dataset.g);
+  if (!g) return;
+  const pop = el('div', 'gpop');
+  pop.setAttribute('role', 'dialog');
+  pop.innerHTML = '<b class="gw"></b><p class="gen"></p><p class="gur" dir="rtl" lang="ur"></p>' +
+    (glossLaw(g) ? '<blockquote></blockquote><button type="button" class="statref"></button>' : '') +
+    '<small>Plain meaning written by the Wakeel team. General information, not legal advice.</small>';
+  pop.querySelector('.gw').textContent = btn.textContent;
+  pop.querySelector('.gen').textContent = g.en;
+  pop.querySelector('.gur').textContent = g.ur;
+  if (glossLaw(g)) {
+    pop.querySelector('blockquote').textContent = glossLaw(g);
+    const s = pop.querySelector('.statref'); s.dataset.stat = g.law; s.textContent = statuteLabel(g.law, STATUTES[g.law]) + ' →';
+  }
+  document.body.appendChild(pop);
+  const r = btn.getBoundingClientRect(), w = Math.min(360, window.innerWidth - 24);
+  pop.style.width = w + 'px';
+  pop.style.left = Math.max(12, Math.min(window.innerWidth - w - 12, r.left)) + 'px';
+  const below = r.bottom + 8, h = pop.offsetHeight;
+  pop.style.top = (below + h > window.innerHeight - 8 && r.top - h - 8 > 0 ? r.top - h - 8 : below) + 'px';
+}
+function closeGloss() { document.querySelectorAll('.gpop').forEach(p => p.remove()); }
+document.addEventListener('click', e => {
+  const b = e.target.closest('.gloss');
+  if (b) { e.preventDefault(); openGloss(b); return; }
+  if (!e.target.closest('.gpop')) closeGloss();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeGloss(); });
+window.addEventListener('scroll', closeGloss, {passive: true});
+document.addEventListener('scroll', e => { if (!e.target.closest || !e.target.closest('.gpop')) closeGloss(); }, true);
 function renderResult(container, data, key, query, opts) {
   opts = opts || {};
   if (!data.language) data.language = segValue('language');   // saved with the answer, so Listen knows its language later
@@ -2717,6 +2930,7 @@ function renderResult(container, data, key, query, opts) {
   const ans = el('div', 'md' + (data.route === 'SQ' ? ' numbered' : '') + (isError ? ' error-text' : ''));
   ans.innerHTML = renderMarkdown(data.answer || 'No answer produced.', key, sources);
   markSeverity(ans);
+  if (!isError) glossify(ans);
   container.appendChild(ans);
   if (isError) return;
 
@@ -2919,6 +3133,7 @@ async function openJudgment(docId) {
     '<ul class="plist">' + (j.passages || []).map(p =>
       '<li><b>' + (p.paragraph && p.paragraph !== '0' ? '¶' + escapeHtml(p.paragraph) : 'Head') + '</b><span dir="auto">' +
       escapeHtml((p.text || '').slice(0, 220)) + ((p.text || '').length > 220 ? '…' : '') + '</span></li>').join('') + '</ul>');
+  glossify($('panel').querySelector('.plist:last-of-type'));
   $('panel').querySelector('[data-act="sum"]').addEventListener('click', () => { go('/summarize'); selectForSummary(docId); });
   $('panel').querySelector('[data-act="cmp"]').addEventListener('click', () => { go('/compare'); loadJudgments().then(() => { $('cmp-a').value = docId; }); });
   $('panel').querySelector('[data-act="time"]').addEventListener('click', () => timelineOf(docId, caseTitle(j)));
@@ -3950,6 +4165,124 @@ $('voice-mic').addEventListener('click', () => {
 });
 $('voice-type').addEventListener('submit', e => { e.preventDefault(); const t = $('voice-text').value.trim(); if (!t) return;
   $('voice-heard').textContent = t; $('voice-text').value = ''; voiceAsk(t); });
+
+// ===========================================================================
+// DEMO AUTOPILOT: the whole story, played by the app itself, with a caption saying what each step shows.
+// It presses the same buttons a person would, so with the demo cache warm nothing waits on the network.
+// Space pauses, the right arrow skips a step, Esc stops. Start it from the pitch page, with F9, or ?autopilot.
+// ===========================================================================
+const AUTO = {on: false, paused: false, skip: false, i: 0};
+const autoSleep = async ms => {
+  const end = Date.now() + ms;
+  while (Date.now() < end || AUTO.paused) {
+    if (!AUTO.on) throw new Error('stopped');
+    if (AUTO.skip) return;
+    await new Promise(r => setTimeout(r, 100));
+  }
+};
+const autoUntil = async (test, ms) => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (!AUTO.on) throw new Error('stopped');
+    if (AUTO.skip) return false;
+    try { if (test()) return true; } catch (e) {}
+    await new Promise(r => setTimeout(r, 150));
+  }
+  return false;
+};
+async function autoType(field, text, cps) {
+  field.value = ''; field.focus();
+  for (let i = 0; i < text.length; i += 2) {
+    if (AUTO.skip) break;
+    field.value = text.slice(0, i + 2); field.dispatchEvent(new Event('input'));
+    await autoSleep(1000 / (cps || 45));
+  }
+  field.value = text; field.dispatchEvent(new Event('input'));
+}
+const autoScroll = (node, off) => { if (node) window.scrollTo({top: node.getBoundingClientRect().top + scrollY - (off || 70), behavior: 'smooth'}); };
+const solveCard = (who, start) => SOLVES[who].find(x => x.q.startsWith(start));
+const AUTOPILOT = [
+  {cap: 'Wakeel AI: legal help built on real Lahore High Court judgments, for the people who need a lawyer and for the lawyers themselves.',
+   run: async () => { setSeg('mode', 'citizen'); setSeg('language', 'en'); WS.who = 'lawyer'; go('/'); window.scrollTo(0, 0); await autoSleep(7000); }},
+  {cap: 'The map is live: every dot is a real judgment, a case it cites, or a section it applies. Each answer is traced back to them.',
+   run: async () => { autoScroll(document.querySelector('.netblock'), 90); await autoSleep(6000); }},
+  {cap: 'What it solves: the problems people bring to a lawyer, and the hours lawyers lose. Each one has an agent on it.',
+   run: async () => { autoScroll($('solve'), 20); await autoSleep(4500); renderSolve('lawyers'); await autoSleep(4500); renderSolve('people'); }},
+  {cap: 'A citizen describes a problem in plain words. An orchestrator reads it and deploys a team of six agents.',
+   run: async () => {
+     go('/'); window.scrollTo({top: 0, behavior: 'smooth'}); await autoSleep(800);
+     await autoType($('live-text'), CASE_TRIES[0][1], 60); await autoSleep(600);
+     $('live-form').requestSubmit();
+     await autoUntil(() => caseRun && caseRun.team && caseRun.team.length > 1, 40000);
+     autoScroll($('room-stage'), 10);
+     await autoUntil(() => caseRun.finished, 90000);
+   }},
+  {cap: 'They worked in parallel: research, statutes word for word, precedents, strategy, a draft notice, and a verifier with no AI.',
+   run: async () => { autoScroll($('room-gantt'), 260); await autoSleep(6000); }},
+  {cap: 'Tap any legal word for its meaning in Urdu and English, with the law behind it.',
+   run: async () => {
+     const g = $('case-out').querySelector('.gloss');
+     if (g) { autoScroll(g, 200); await autoSleep(1200); openGloss(g); }
+     await autoSleep(6000); closeGloss();
+   }},
+  {cap: 'For a lawyer: the brief checker finds an invented section, a repealed one and a report from 2031. No AI is used.',
+   run: async () => { solveCard('lawyers', 'Did the AI').go(); await autoUntil(() => document.querySelector('.brief-check'), 20000);
+                      autoScroll(document.querySelector('.brief-check'), 90); await autoSleep(8000); }},
+  {cap: 'Practice before the judge: the bench questions counsel one point at a time, citing the judgments, then scores the answers.',
+   run: async () => {
+     wsUpdate(m => { m.facts = m.facts || 'Client Tariq Mehmood is accused under Section 489-F PPC (FIR 214/2024). A cheque of Rs. 900,000 was dishonoured on 1 March 2024. He says it was security for a business loan. In custody since 5 March 2024; no previous record.'; });
+     wsShow('workflows'); await wsStartFlow(wsFlows().find(f => f.id === 'moot'));
+     $('mt-voice').checked = false; $('mt-go').click();
+     await autoUntil(() => document.querySelector('.court-ans:not([hidden])'), 40000);
+     autoScroll(document.querySelector('.court'), 70); await autoSleep(5000);
+     const f = document.querySelector('.court-ans');
+     if (f) { await autoType(f.querySelector('textarea'), 'My lord, Section 489-F carries at most three years, so it is outside the prohibitory clause, and the cheque was given only as security for a loan.', 70); f.requestSubmit(); }
+     await autoUntil(() => document.querySelectorAll('.court-judge').length > 1, 40000);
+     autoScroll(document.querySelectorAll('.court-judge')[1], 120); await autoSleep(7000);
+   }},
+  {cap: 'For someone being arrested right now: their rights in Urdu, each in the Constitution’s own words, with free helplines.',
+   run: async () => { openRights('ur'); await autoSleep(5000); const p = $('panel'); p.scrollTo({top: 420, behavior: 'smooth'}); await autoSleep(5000); closePanel(); }},
+  {cap: 'Built to Pakistan’s 2026 judicial AI guidelines: people decide, every step is shown, every source is checked, nothing is stored.',
+   run: async () => { go('/pitch'); await autoSleep(600); autoScroll(document.querySelector('.guide-map'), 140); await autoSleep(8000); }},
+  {cap: 'Wakeel AI. Every answer traced to its paragraph.',
+   run: async () => { go('/'); window.scrollTo({top: 0, behavior: 'smooth'}); await autoSleep(5000); }},
+];
+function autoShow() {
+  const n = AUTOPILOT.length;
+  $('auto-n').textContent = (AUTO.i + 1) + ' / ' + n;
+  $('auto-cap').textContent = AUTOPILOT[AUTO.i].cap;
+  $('auto-prog').style.width = (100 * AUTO.i / (n - 1)) + '%';
+  $('auto-pause').textContent = AUTO.paused ? 'Resume' : 'Pause';
+}
+async function autopilot() {
+  if (AUTO.on) return;
+  AUTO.on = true; AUTO.paused = false; AUTO.i = 0;
+  $('auto').hidden = false; document.body.classList.add('auto-on');
+  try {
+    for (; AUTO.i < AUTOPILOT.length; AUTO.i++) {
+      AUTO.skip = false;
+      autoShow();
+      try { await AUTOPILOT[AUTO.i].run(); }
+      catch (e) { if (e.message === 'stopped') throw e; }   // a step that fails moves on; the story goes on
+      if (!AUTO.skip) await autoSleep(400);
+    }
+  } catch (e) { /* stopped */ }
+  AUTO.on = false; $('auto').hidden = true; document.body.classList.remove('auto-on'); closeGloss();
+}
+function autoStop() { AUTO.on = false; }
+$('auto-pause').addEventListener('click', () => { AUTO.paused = !AUTO.paused; autoShow(); });
+$('auto-next').addEventListener('click', () => { AUTO.skip = true; });
+$('auto-stop').addEventListener('click', autoStop);
+$('pitch-auto').addEventListener('click', autopilot);
+document.addEventListener('keydown', e => {
+  if (e.key === 'F9') { e.preventDefault(); AUTO.on ? autoStop() : autopilot(); return; }
+  if (!AUTO.on) return;
+  const typing = e.target.closest && e.target.closest('input, textarea, [contenteditable="true"]');
+  if (e.key === 'Escape') autoStop();
+  else if (e.key === 'ArrowRight' && !typing) AUTO.skip = true;
+  else if (e.key === ' ' && !typing) { e.preventDefault(); AUTO.paused = !AUTO.paused; autoShow(); }
+});
+if (new URLSearchParams(location.search).has('autopilot')) setTimeout(autopilot, 1200);
 
 // The agent room's map: what each agent touches lights up, with a line saying who touched what.
 function netSay(who, n, what) {
@@ -6645,13 +6978,10 @@ def make_handler(agent, index_fn, stats_fn=corpus_stats, cache=None, replay_dela
                     return
                 history = data.get("history") if isinstance(data.get("history"), list) else []
                 args = (facts, str(data.get("side") or ""), str(data.get("hearing") or ""), history, bool(data.get("finish")))
-                # Only the opening question is the same every time; later turns depend on counsel's own answers.
-                if not history:
-                    self._json(200, cached_task("moot", {"facts": facts, "side": args[1], "hearing": args[2], "mode": mode,
-                                                         "language": language},
-                                                lambda: guarded(lambda: agent.moot_turn(*args, mode=mode, language=language))))
-                else:
-                    self._json(200, guarded(lambda: agent.moot_turn(*args, mode=mode, language=language)))
+                # Keyed on the whole hearing so far: a rehearsed hearing (the demo's) replays, and a new answer is a new turn.
+                self._json(200, cached_task("moot", {"facts": facts, "side": args[1], "hearing": args[2], "history": history,
+                                                     "finish": args[4], "mode": mode, "language": language},
+                                            lambda: guarded(lambda: agent.moot_turn(*args, mode=mode, language=language))))
                 return
 
             if self.path == "/api/citator":

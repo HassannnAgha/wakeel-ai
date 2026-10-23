@@ -843,3 +843,47 @@ def test_helplines_are_the_checked_ones_and_dial():
     for number, tel in (("1818", "tel:1818"), ("0800-70806", "tel:080070806"), ("1099", "tel:1099"), ("15", "tel:15")):
         assert f"'{number}', '{tel}'" in block
     assert "Built to Pakistan's judicial AI guidelines" in page and 'id="voice-mic"' in page
+
+
+def test_glossary_words_and_their_laws():
+    node = shutil.which("node")
+    if node:
+        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "glossary_test.js")
+        run = subprocess.run([node, script], capture_output=True, text=True, encoding="utf-8", timeout=60)
+        assert run.returncode == 0, run.stdout + run.stderr
+    page = ui.PAGE
+    block = page[page.index("const GLOSSARY = ["): page.index("let GLOSS_RES = null;")]
+    statutes = ui.load_statutes()
+    laws = re.findall(r"law: '([a-z]+:[0-9A-Z]+)'", block)
+    assert len(laws) >= 15
+    for key in laws:
+        assert key in statutes, key                       # every meaning points at a section we hold
+
+
+def test_autopilot_steps_point_at_things_that_exist():
+    page = ui.PAGE
+    block = page[page.index("const AUTOPILOT = ["): page.index("function autoShow()")]
+    solves = page[page.index("const SOLVES = {"): page.index("function renderSolve(")]
+    for who, start in re.findall(r"solveCard\('(\w+)', '([^']+)'\)", block):
+        assert re.search(r"\{q: '" + re.escape(start), solves), start      # the card the step presses is there
+    for fn in re.findall(r"\b(wsStartFlow|openRights|openGloss|renderSolve|wsShow|wsUpdate|closePanel|closeGloss)\(", block):
+        assert "function " + fn + "(" in page
+    for sel in re.findall(r"\$\('([\w-]+)'\)", block):
+        assert f'id="{sel}"' in page or f"id='{sel}'" in page or sel in ("live-text", "live-form"), sel
+    assert 'id="pitch-auto"' in page and "F9" in page
+
+
+
+def test_demo_prep_fills_exactly_what_the_autopilot_sends():
+    import importlib
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import pytest
+    pytest.importorskip("demo_prep")   # demo files are kept out of the public repo
+    prep = importlib.import_module("demo_prep")
+    page = ui.PAGE
+    auto = page[page.index("const AUTOPILOT = ["): page.index("function autoShow()")]
+    assert "'" + prep.MOOT_FACTS + "'" in auto                       # the hearing's facts, word for word
+    assert prep.MOOT_ANSWER in auto and "a post-arrest bail application" in page
+    js_petition = page[page.index("const SAMPLE_PETITION = '") + len("const SAMPLE_PETITION = '"):]
+    js_petition = js_petition[:js_petition.index("';")].replace(chr(92) + "n", chr(10))
+    assert js_petition == prep.SAMPLE_PETITION                       # the petition the opposing-counsel card sends
