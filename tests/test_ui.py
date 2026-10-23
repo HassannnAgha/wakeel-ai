@@ -882,8 +882,19 @@ def test_demo_prep_fills_exactly_what_the_autopilot_sends():
     prep = importlib.import_module("demo_prep")
     page = ui.PAGE
     auto = page[page.index("const AUTOPILOT = ["): page.index("function autoShow()")]
-    assert "'" + prep.MOOT_FACTS + "'" in auto                       # the hearing's facts, word for word
+    assert "const COURT_SAMPLE = '" + prep.MOOT_FACTS + "';" in page  # the Courtroom sample's facts, word for word
+    assert "$('court-sample').click()" in auto                         # which the autopilot's hearing uses
     assert prep.MOOT_ANSWER in auto and "a post-arrest bail application" in page
+    assert prep.MOOT["side"] in page and prep.MOOT["hearing"] in page
     js_petition = page[page.index("const SAMPLE_PETITION = '") + len("const SAMPLE_PETITION = '"):]
     js_petition = js_petition[:js_petition.index("';")].replace(chr(92) + "n", chr(10))
     assert js_petition == prep.SAMPLE_PETITION                       # the petition the opposing-counsel card sends
+
+
+def test_inheritance_fields_take_only_whole_numbers_within_their_limit():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is not installed")
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "countfield_test.js")
+    run = subprocess.run([node, script], capture_output=True, text=True, timeout=60)
+    assert run.returncode == 0, run.stdout + run.stderr

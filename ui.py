@@ -41,7 +41,7 @@ from urllib.parse import unquote, urlsplit
 import wakeel_ai as W
 
 APP_PATHS = ("/", "/index.html", "/ask", "/summarize", "/compare", "/explain", "/draft",
-             "/guides", "/calculate", "/library", "/matters", "/case", "/pitch", "/developers", "/workspace")
+             "/guides", "/calculate", "/library", "/matters", "/case", "/pitch", "/developers", "/workspace", "/court", "/verify")
 # Requests a page can watch: with "watch": true the answer comes as a stream of what each agent does, then the result.
 WATCHED_PATHS = ("/api/summarize", "/api/compare", "/api/explain", "/api/explain/ask", "/api/draft", "/api/table",
                  "/api/table/ask", "/api/strategy", "/api/workflow", "/api/judgment/ask", "/api/citator", "/api/moot")
@@ -419,6 +419,33 @@ PAGE = r"""<!doctype html>
   .auto-keys button:hover { color: var(--white); border-color: var(--marker); }
   body.auto-on { padding-bottom: 72px; }
   @media (max-width: 760px) { .auto-in { flex-wrap: wrap; gap: 8px; padding: 10px 14px; } .auto-in p { flex-basis: 100%; order: 3; font-size: 14px; } }
+
+  .navmore { position: relative; flex: none; }
+  .navmore > button { font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); padding: 6px 0; }
+  .navmore > button::after { content: ' \25BE'; }
+  .navmore > button.on, .navmore > button:hover { color: var(--ink); }
+  .navmenu { position: absolute; top: calc(100% + 12px); left: -14px; z-index: 30; background: var(--white); border: 1px solid var(--black);
+             box-shadow: 6px 6px 0 rgba(10,10,10,.85); display: flex; flex-direction: column; min-width: 180px; padding: 6px 0; }
+  .navmenu[hidden] { display: none; }
+  .navmenu a { padding: 9px 16px; text-decoration: none; font-size: 12px; letter-spacing: .12em; text-transform: uppercase; color: var(--rock); white-space: nowrap; }
+  .navmenu a:hover { background: var(--beige); color: var(--ink); }
+  .court-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+  #vf-tabs { margin-bottom: 18px; }
+  .vf-next { align-items: center; margin-top: 14px; }
+  .vf-next .field { max-width: 220px; margin: 0; }
+  .vf-papers { margin: 6px 0 12px; }
+  .vf-paper { display: flex; gap: 12px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .vf-paper span { color: var(--muted); font-size: 12.5px; flex: 1; }
+  .vf-vault { display: block; margin: 8px 0; font-size: 13.5px; }
+  .vf-add { cursor: pointer; }
+  .vf-citerow { display: flex; gap: 8px; }
+  .vf-citerow .field { margin: 0; }
+  .vf-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 14px; }
+  .vf-chips .eyebrow { margin-right: 6px; }
+  .vf-chips button { border: 1px solid var(--line); background: var(--white); padding: 4px 10px; font-size: 12.5px; }
+  .vf-chips button:hover { border-color: var(--black); }
+  .vf-cite-h { margin: 18px 0 0; }
+  @media (max-width: 640px) { .court-grid { grid-template-columns: 1fr; } .vf-citerow { flex-direction: column; } }
 
   /* ---------- home ---------- */
   .home { display: grid; grid-template-columns: 1.35fr 1fr; min-height: calc(100vh - 56px);
@@ -1045,15 +1072,18 @@ PAGE = r"""<!doctype html>
     <a href="/workspace" data-link data-nav="workspace">Workspace</a>
     <a href="/ask" data-link data-nav="ask">Ask</a>
     <a href="/case" data-link data-nav="case">Agent room</a>
-    <a href="/summarize" data-link data-nav="summarize">Summarize</a>
-    <a href="/compare" data-link data-nav="compare">Compare</a>
+    <a href="/court" data-link data-nav="court">Courtroom</a>
+    <a href="/verify" data-link data-nav="verify">Verify</a>
     <a href="/explain" data-link data-nav="explain">Explain</a>
     <a href="/draft" data-link data-nav="draft">Draft</a>
     <a href="/guides" data-link data-nav="guides">Guides</a>
-    <a href="/calculate" data-link data-nav="calculate">Calculate</a>
     <a href="/library" data-link data-nav="library">Library</a>
-    <a href="/matters" data-link data-nav="matters">Matters</a>
   </nav>
+  <div class="navmore" id="navmore"><button type="button" aria-expanded="false" aria-haspopup="true">More</button>
+    <div class="navmenu" hidden>
+      <a href="/summarize" data-link data-more="summarize">Summarize</a><a href="/compare" data-link data-more="compare">Compare</a>
+      <a href="/calculate" data-link data-more="calculate">Calculate</a><a href="/matters" data-link data-more="matters">Matters</a>
+      <a href="/pitch" data-link data-more="pitch">The pitch</a></div></div>
   <span class="grow"></span>
   <div class="toggle" id="mode" role="radiogroup" aria-label="Who the answer is written for">
     <span class="lbl">For</span>
@@ -1480,6 +1510,75 @@ print(draft["answer"])</pre>
     </div>
   </section>
 
+  <section data-page="court">
+    <div class="wrap wide">
+      <div class="ptitle">
+        <div><div class="eyebrow">Moot court · rehearse before you appear</div><h1 class="display">Courtroom</h1></div>
+        <p>A Lahore High Court judge questions you one point at a time, citing the judgments, and reacts to each answer.
+           Answer by typing or speaking, in English or Urdu. After five questions you get a score and feedback on every answer.</p>
+      </div>
+      <div class="ws-formbox court-setup">
+        <div class="court-grid">
+          <div><label class="eyebrow" for="court-hearing">The hearing</label><input class="field" id="court-hearing" value="a post-arrest bail application"></div>
+          <div><label class="eyebrow" for="court-side">Your side</label><input class="field" id="court-side" value="accused (petitioner)"></div>
+        </div>
+        <label class="eyebrow" for="court-facts">The facts</label>
+        <textarea class="field" id="court-facts" rows="5" dir="auto" placeholder="Who you act for, what happened and when, what the FIR or the other side says"></textarea>
+        <label class="mt-speak"><input type="checkbox" id="court-voice" checked> The judge speaks aloud (best in Microsoft Edge)</label>
+        <div class="ctas"><button class="btn" type="button" id="court-go">Enter the courtroom</button>
+          <button class="btn line" type="button" id="court-sample">Try a sample: bail in a bounced-cheque case</button></div>
+      </div>
+      <div id="court-out"></div>
+    </div>
+  </section>
+
+  <section data-page="verify">
+    <div class="wrap wide">
+      <div class="ptitle">
+        <div><div class="eyebrow">Before you file</div><h1 class="display">Verify</h1></div>
+        <p>Check a draft before it reaches the court: every section and case it cites, every fact against your papers,
+           and whether a case is still followed. The law check uses no AI.</p>
+      </div>
+      <div class="libtabs" id="vf-tabs"><button type="button" class="on" data-tab="law">Check the law</button>
+        <button type="button" data-tab="facts">Check the facts</button><button type="button" data-tab="case">Is a case still followed?</button></div>
+      <div class="vf-pane" data-pane="law">
+        <div class="ws-formbox">
+          <p class="ws-empty">Every section is looked up in the official text, every reported case in the library, every year against today.
+             An invented or repealed section and an impossible citation are flagged; a case we do not hold is marked to check.</p>
+          <label class="eyebrow" for="vf-text">The draft</label>
+          <textarea class="field" id="vf-text" rows="9" dir="auto" placeholder="Paste a petition, a notice, an application or any draft"></textarea>
+          <div class="ctas"><button class="btn" type="button" id="vf-go">Check the law</button>
+            <button class="btn line" type="button" id="vf-sample">Try a sample petition</button></div>
+        </div>
+        <div id="vf-out"></div>
+      </div>
+      <div class="vf-pane" data-pane="facts" hidden>
+        <div class="ws-formbox">
+          <p class="ws-empty">Each fact in the draft is marked supported, contradicted or not in the papers, with the words that show it.
+             Every quote is checked here, in your browser, against the paper itself. Papers are read for this check only, never stored.</p>
+          <label class="eyebrow" for="vf-draft">The draft</label>
+          <textarea class="field" id="vf-draft" rows="7" dir="auto" placeholder="Paste the petition, plaint, reply or statement"></textarea>
+          <div class="eyebrow">The papers</div>
+          <div class="vf-papers" id="vf-papers"></div>
+          <div class="ctas"><label class="btn line vf-add">Add papers (PDF, photo or text)<input type="file" id="vf-files" multiple accept=".pdf,.txt,.md,image/*" hidden></label>
+            <button class="btn line" type="button" id="vf-fir">Use the sample FIR</button>
+            <button class="btn" type="button" id="vf-check">Check the facts</button></div>
+        </div>
+        <div id="vf-fout"></div>
+      </div>
+      <div class="vf-pane" data-pane="case" hidden>
+        <div class="ws-formbox">
+          <p class="ws-empty">The citator agent reads each judgment in the library that cites the case and labels it: followed, distinguished,
+             doubted or only mentioned, with the words that show it. It knows only how this library treats the case.</p>
+          <label class="eyebrow" for="vf-cite">A reported case</label>
+          <div class="vf-citerow"><input class="field" id="vf-cite" placeholder="e.g. 2013 SCMR 1205 or PLD 2016 SC 808"><button class="btn" type="button" id="vf-cite-go">Run the citator</button></div>
+          <div class="vf-chips" id="vf-chips"></div>
+        </div>
+        <div id="vf-cout"></div>
+      </div>
+    </div>
+  </section>
+
   <section data-page="matters">
     <div class="wrap wide">
       <div class="ptitle">
@@ -1885,7 +1984,7 @@ function caseNumber(s) { return [s.judgment_type, s.case_no].filter(Boolean).joi
 // ===========================================================================
 // pages
 // ===========================================================================
-const PAGES = ['home', 'ask', 'summarize', 'compare', 'explain', 'draft', 'guides', 'calculate', 'library', 'matters', 'case', 'pitch', 'developers', 'workspace'];
+const PAGES = ['home', 'ask', 'summarize', 'compare', 'explain', 'draft', 'guides', 'calculate', 'library', 'matters', 'case', 'pitch', 'developers', 'workspace', 'court', 'verify'];
 function pageFromPath(p) { const n = p.replace(/^\/+|\/+$/g, ''); return PAGES.includes(n) ? n : 'home'; }
 function showPage(name) {
   document.querySelectorAll('main > section').forEach(s => s.classList.toggle('on', s.dataset.page === name));
@@ -1904,6 +2003,11 @@ function showPage(name) {
   if (name === 'calculate' && !calcId) selectCalc(CALCS[0].id);
   if (name === 'matters') renderMatters(new URLSearchParams(location.search).get('m'));
   if (name === 'workspace') wsOpen();
+  if (name === 'court') courtOpen();
+  if (name === 'verify') verifyOpen();
+  const more = $('navmore');
+  more.querySelector('button').classList.toggle('on', !!more.querySelector('[data-more="' + name + '"]'));
+  more.querySelector('.navmenu').hidden = true;
 }
 function go(path) {
   if (location.pathname + location.search !== path) history.pushState({}, '', path);
@@ -2116,8 +2220,9 @@ async function openCitation(k) {
   $('cite-treat').addEventListener('click', () => runCitator(k));
 }
 const TREATMENT = {followed: 'Followed', distinguished: 'Distinguished', doubted: 'Doubted', mentioned: 'Mentioned'};
-async function runCitator(k) {
-  const c = CITES[k], out = $('cite-out'), btn = $('cite-treat');
+async function runCitator(k, out, btn) {
+  const c = CITES[k];
+  out = out || $('cite-out'); btn = btn || $('cite-treat');
   btn.disabled = true;
   out.innerHTML = '';
   const data = await watchedPost('/api/citator', {citation: c.display, refs: c.refs}, out.appendChild(el('div')));
@@ -3400,7 +3505,7 @@ const SOLVES = {
                  wsStartFlow(wsFlows().find(f => f.id === 'opponent')).then(() => { if ($('wsf1')) $('wsf1').value = 'Accused (petitioner)'; $('wsf-go').click(); }); }},
     {q: 'Did the AI invent a citation in my draft?', was: 'Invented cases in a filed brief', agent: 'Brief checker', rules: true,
      how: 'Every section is checked against the official text and every case against the library. A year still to come is caught too.',
-     go: () => { WS.who = 'lawyer'; WS.autoSample = true; go('/workspace?who=lawyer'); wsShow('workflows'); wsStartFlow(wsFlows().find(f => f.id === 'checkbrief')); }},
+     go: () => { go('/verify'); verifyTab('law'); $('vf-sample').click(); }},
     {q: 'A sixty-page judgment, and court in an hour.', was: 'Skim it and hope', agent: 'Summary agent',
      how: 'Facts, issues, holding and relief, section by section, every point tied to its paragraph.', go: solveSummary},
     {q: 'Comparing a stack of judgments for one brief.', was: 'A spreadsheet built by hand', agent: 'Review table',
@@ -3906,7 +4011,7 @@ function wsMootSetup(f) {
   });
 }
 function wsMoot(cfg) {
-  const out = $('ws-wout');
+  const out = cfg.out || $('ws-wout');
   out.innerHTML = '<div class="court"><div class="court-h"><span>Court in session · <b class="court-hearing"></b></span><span class="court-n"></span></div>' +
     '<ol class="court-log"></ol><div class="court-think"></div><form class="court-ans" hidden><textarea class="field" rows="3" dir="auto" placeholder="Your answer, my lord…"></textarea>' +
     '<div class="ctas"><button class="mic" type="button" hidden></button><button class="btn" type="submit">Answer</button>' +
@@ -3938,7 +4043,7 @@ function wsMoot(cfg) {
       renderResult(rv.appendChild(el('div')), data, 'mt' + (++seq), cfg.hearing, {noSave: true, whole: false, noHelp: true});
       say(data.answer.split('\n').slice(0, 3).join(' '));
       const transcript = history.map(t => (t.role === 'judge' ? '**The court:** ' : '**Counsel:** ') + t.text).join('\n\n');
-      wsSave({kind: 'moot', title: 'Practice hearing: ' + cfg.hearing, query: '', agents: Object.values(agents),
+      if (cfg.save !== false) wsSave({kind: 'moot', title: 'Practice hearing: ' + cfg.hearing, query: '', agents: Object.values(agents),
               data: {...data, answer: '## The hearing\n\n' + transcript + '\n\n' + data.answer}});
       return;
     }
@@ -4230,9 +4335,7 @@ const AUTOPILOT = [
                       autoScroll(document.querySelector('.brief-check'), 90); await autoSleep(8000); }},
   {cap: 'Practice before the judge: the bench questions counsel one point at a time, citing the judgments, then scores the answers.',
    run: async () => {
-     wsUpdate(m => { m.facts = m.facts || 'Client Tariq Mehmood is accused under Section 489-F PPC (FIR 214/2024). A cheque of Rs. 900,000 was dishonoured on 1 March 2024. He says it was security for a business loan. In custody since 5 March 2024; no previous record.'; });
-     wsShow('workflows'); await wsStartFlow(wsFlows().find(f => f.id === 'moot'));
-     $('mt-voice').checked = false; $('mt-go').click();
+     go('/court'); await autoSleep(1500); $('court-voice').checked = false; $('court-sample').click();
      await autoUntil(() => document.querySelector('.court-ans:not([hidden])'), 40000);
      autoScroll(document.querySelector('.court'), 70); await autoSleep(5000);
      const f = document.querySelector('.court-ans');
@@ -4283,6 +4386,118 @@ document.addEventListener('keydown', e => {
   else if (e.key === ' ' && !typing) { e.preventDefault(); AUTO.paused = !AUTO.paused; autoShow(); }
 });
 if (new URLSearchParams(location.search).has('autopilot')) setTimeout(autopilot, 1200);
+
+// ===========================================================================
+// COURTROOM and VERIFY: the moot court and the checks before filing, each on its own page.
+// ===========================================================================
+const COURT_SAMPLE = 'Client Tariq Mehmood is accused under Section 489-F PPC (FIR 214/2024). A cheque of Rs. 900,000 was dishonoured on 1 March 2024. He says it was security for a business loan. In custody since 5 March 2024; no previous record.';
+function courtOpen() { if (!$('court-facts').value.trim() && WS.mid) { const m = wsMatters().find(x => x.id === WS.mid); if (m && m.facts) $('court-facts').value = m.facts; } }
+function courtStart() {
+  const facts = $('court-facts').value.trim();
+  if (!facts) { $('court-facts').focus(); return; }
+  wsMoot({facts, side: $('court-side').value.trim(), hearing: $('court-hearing').value.trim(), voice: $('court-voice').checked,
+          title: 'Practice hearing', out: $('court-out'), save: false});
+}
+$('court-go').addEventListener('click', courtStart);
+$('court-sample').addEventListener('click', () => {
+  $('court-hearing').value = 'a post-arrest bail application'; $('court-side').value = 'accused (petitioner)'; $('court-facts').value = COURT_SAMPLE;
+  setSeg('mode', 'lawyer'); courtStart();
+});
+function verifyTab(t) {
+  document.querySelectorAll('#vf-tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+  document.querySelectorAll('.vf-pane').forEach(x => { x.hidden = x.dataset.pane !== t; });
+}
+$('vf-tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (b) verifyTab(b.dataset.tab); });
+async function verifyOpen() {
+  await Promise.all([loadJudgments(), citesReady]);
+  const top = Object.entries(CITES).sort((a, b) => Object.keys(b[1].refs).length - Object.keys(a[1].refs).length).slice(0, 8);
+  $('vf-chips').innerHTML = '<span class="eyebrow">Most cited in the library</span>' + top.map(([k, c]) => '<button type="button" data-k="' + escapeHtml(k) + '"></button>').join('');
+  $('vf-chips').querySelectorAll('[data-k]').forEach((b, i) => { b.textContent = top[i][1].display + ' · ' + Object.keys(top[i][1].refs).length; });
+  verifyPapers();
+}
+// Check the law: the brief checker, then opposing counsel on the same draft.
+async function verifyLaw(text) {
+  await Promise.all([loadJudgments(), citesReady]);
+  const out = $('vf-out');
+  out.innerHTML = '';
+  renderBriefCheck(out, text);
+  const next = el('div', 'ctas vf-next');
+  next.innerHTML = '<input class="field" id="vf-side" value="Accused (petitioner)" aria-label="Your side"><button class="btn" type="button">Now argue against it: opposing counsel</button>' +
+    '<button class="btn line" type="button">Check its facts against the papers</button>';
+  next.children[1].addEventListener('click', async () => {
+    const target = out.appendChild(el('div'));
+    const facts = {'Your draft or argument (paste it)': text, 'Your side (e.g. accused, petitioner, tenant)': $('vf-side').value.trim()};
+    const data = await watchedPost('/api/workflow', {kind: 'opponent', facts, mode: segValue('mode'), language: segValue('language')}, target, text);
+    renderResult(target, data, 'vo' + (++seq), 'Opposing counsel', {noSave: true, whole: false, reveal: true, print: 'Opposing counsel', noHelp: true});
+    target.scrollIntoView({behavior: 'smooth', block: 'start'});
+  });
+  next.lastChild.addEventListener('click', () => { $('vf-draft').value = text; verifyTab('facts'); $('vf-draft').scrollIntoView({behavior: 'smooth', block: 'center'}); });
+  out.appendChild(next);
+  out.scrollIntoView({behavior: 'smooth', block: 'start'});
+}
+$('vf-go').addEventListener('click', () => { const t = $('vf-text').value.trim(); if (t) verifyLaw(t); else $('vf-text').focus(); });
+$('vf-sample').addEventListener('click', () => { $('vf-text').value = SAMPLE_PETITION; setSeg('mode', 'lawyer'); verifyLaw(SAMPLE_PETITION); });
+// Check the facts: the papers are read into text here and kept only while the page is open.
+let VF_PAPERS = [];
+function verifyPapers() {
+  const box = $('vf-papers'), vault = WS.mid ? wsVault() : [];
+  box.innerHTML = VF_PAPERS.length || vault.length ? '' : '<p class="ws-empty">No papers yet: add the FIR, notices, orders or receipts.</p>';
+  VF_PAPERS.forEach((d, i) => { const r = el('div', 'vf-paper'); r.innerHTML = '<b></b><span></span><button type="button" class="copy">Remove</button>';
+    r.querySelector('b').textContent = d.name; r.querySelector('span').textContent = d.text.length.toLocaleString() + ' characters';
+    r.querySelector('button').addEventListener('click', () => { VF_PAPERS.splice(i, 1); verifyPapers(); }); box.appendChild(r); });
+  if (vault.length) box.insertAdjacentHTML('beforeend', '<label class="vf-vault"><input type="checkbox" id="vf-usevault"> Also use the ' + plural(vault.length, 'paper') + ' in my Workspace vault</label>');
+}
+$('vf-files').addEventListener('change', async e => {
+  for (const f of [...e.target.files]) {
+    const isText = /\.(txt|md)$/i.test(f.name) || f.type.startsWith('text/');
+    const body = isText ? {filename: f.name, text: await f.text()}
+      : {filename: f.name, mime: f.type || '', data: await new Promise(res => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1] || ''); r.readAsDataURL(f); })};
+    let d;
+    try { d = await (await fetch('/api/extract', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})).json(); }
+    catch (err) { d = {route: 'ERROR', answer: err.message}; }
+    if (d.route !== 'ERROR') VF_PAPERS.push({name: f.name, text: d.text});
+    else $('vf-papers').insertAdjacentHTML('afterbegin', '<p class="error-text">' + escapeHtml(f.name + ': ' + d.answer) + '</p>');
+  }
+  e.target.value = '';
+  verifyPapers();
+});
+$('vf-fir').addEventListener('click', () => { if (!VF_PAPERS.some(d => d.name === 'Sample FIR 214/2024')) VF_PAPERS.push({name: 'Sample FIR 214/2024', text: TOUR_FIR}); verifyPapers(); });
+$('vf-check').addEventListener('click', async () => {
+  const draft = $('vf-draft').value.trim();
+  if (!draft) { $('vf-draft').focus(); return; }
+  const docs = VF_PAPERS.concat($('vf-usevault') && $('vf-usevault').checked ? wsVault() : []);
+  if (!docs.length) { $('vf-papers').scrollIntoView({behavior: 'smooth', block: 'center'}); return; }
+  const out = $('vf-fout'); out.innerHTML = '';
+  const papers = docs.map(d => '=== ' + d.name + ' ===\n' + d.text).join('\n\n').slice(0, 18000), target = out.appendChild(el('div'));
+  const data = await watchedPost('/api/workflow', {kind: 'evidence', facts: {'Draft': draft, 'Papers': papers}, mode: segValue('mode'),
+                                                   language: segValue('language')}, target, draft);
+  renderResult(target, data, 'vfe' + (++seq), 'Evidence check', {noSave: true, whole: true, print: 'Evidence check', noHelp: true});
+  markEvidence(target, papers);
+  target.scrollIntoView({behavior: 'smooth', block: 'start'});
+});
+// Is a case still followed: the citator, from a citation typed or picked.
+async function verifyCite(textOrKey) {
+  await citesReady;
+  let k = CITES[textOrKey] ? textOrKey : null;
+  if (!k) { CITE_RE.lastIndex = 0; const m = CITE_RE.exec(textOrKey || ''); k = m ? citeKey(m) : null; }
+  const out = $('vf-cout');
+  if (!k || !CITES[k]) { out.innerHTML = '<p class="ws-empty">No judgment in the library cites that case, so there is nothing to read. Check the citation’s form (e.g. 2013 SCMR 1205).</p>'; return; }
+  $('vf-cite').value = CITES[k].display;
+  out.innerHTML = '<h3 class="vf-cite-h"></h3>';
+  out.firstChild.textContent = CITES[k].display + ' · cited by ' + plural(Object.keys(CITES[k].refs).length, 'judgment') + ' in the library';
+  await runCitator(k, out.appendChild(el('div')), $('vf-cite-go'));
+}
+$('vf-cite-go').addEventListener('click', () => verifyCite($('vf-cite').value.trim()));
+$('vf-cite').addEventListener('keydown', e => { if (e.key === 'Enter') verifyCite($('vf-cite').value.trim()); });
+$('vf-chips').addEventListener('click', e => { const b = e.target.closest('[data-k]'); if (b) verifyCite(b.dataset.k); });
+// The More menu in the top bar.
+$('navmore').querySelector('button').addEventListener('click', e => {
+  e.stopPropagation();
+  const menu = $('navmore').querySelector('.navmenu');
+  menu.hidden = !menu.hidden;
+  e.currentTarget.setAttribute('aria-expanded', String(!menu.hidden));
+});
+document.addEventListener('click', e => { if (!e.target.closest('#navmore')) $('navmore').querySelector('.navmenu').hidden = true; });
 
 // The agent room's map: what each agent touches lights up, with a line saying who touched what.
 function netSay(who, n, what) {
@@ -5960,13 +6175,13 @@ function selectCalc(id) {
     $('lim-date').addEventListener('input', update);
     update();
   } else {
-    const n = (id, label, max) => '<label class="eyebrow" for="' + id + '">' + label + '</label><input class="field" type="number" min="0" max="' + max + '" value="0" id="' + id + '">';
+    const n = (id, label, max) => '<label class="eyebrow" for="' + id + '">' + label + '</label><input class="field" type="text" inputmode="numeric" autocomplete="off" data-max="' + max + '" value="0" id="' + id + '">';
     $('calc').innerHTML =
       '<div class="eyebrow">Hanafi (Sunni) law · common heirs</div><h2 class="display">Inheritance shares</h2>' +
       '<div class="form two">' +
       '<label class="eyebrow" for="ih-dec">The deceased was</label><select class="field" id="ih-dec"><option value="male">a man</option><option value="female">a woman</option></select>' +
-      '<label class="eyebrow" for="ih-estate">Estate value (optional, PKR)</label><input class="field" type="number" min="0" id="ih-estate">' +
-      '<label class="eyebrow" for="ih-spouse" id="ih-spouse-l">Wives</label><input class="field" type="number" min="0" max="4" value="0" id="ih-spouse">' +
+      '<label class="eyebrow" for="ih-estate">Estate value (optional, PKR)</label><input class="field" type="text" inputmode="numeric" autocomplete="off" data-max="999999999999" id="ih-estate">' +
+      '<label class="eyebrow" for="ih-spouse" id="ih-spouse-l">Wives</label><input class="field" type="text" inputmode="numeric" autocomplete="off" data-max="4" value="0" id="ih-spouse">' +
       n('ih-sons', 'Sons', 30) + n('ih-daughters', 'Daughters', 30) +
       '<label class="eyebrow" for="ih-father">Father alive</label><select class="field" id="ih-father"><option value="0">No</option><option value="1">Yes</option></select>' +
       '<label class="eyebrow" for="ih-mother">Mother alive</label><select class="field" id="ih-mother"><option value="0">No</option><option value="1">Yes</option></select>' +
@@ -5975,7 +6190,8 @@ function selectCalc(id) {
     const update = () => {
       const male = $('ih-dec').value === 'male';
       $('ih-spouse-l').textContent = male ? 'Wives (0 to 4)' : 'Husband (0 or 1)';
-      $('ih-spouse').max = male ? 4 : 1;
+      $('ih-spouse').dataset.max = male ? 4 : 1;
+      cleanCount($('ih-spouse'));
       const v = id => Math.max(0, parseInt($(id).value || '0', 10) || 0);
       const sp = Math.min(v('ih-spouse'), male ? 4 : 1);
       const h = {deceased: male ? 'male' : 'female', husband: male ? 0 : sp, wives: male ? sp : 0,
@@ -5997,9 +6213,20 @@ function selectCalc(id) {
         '<li>Covers spouses, children, parents and full siblings under Hanafi law. It does not cover grandchildren (whom section 4 of the Muslim Family Laws Ordinance, 1961 lets inherit in place of a predeceased parent), grandparents, half-siblings, debts, bequests, or Shia law.</li>' +
         '<li>Check the result with a lawyer before dividing property.</li></ul>';
     };
+    $('calc').querySelectorAll('input[data-max]').forEach(x => {
+      x.addEventListener('input', () => cleanCount(x));
+      x.addEventListener('blur', () => { if (x.value === '' && x.id !== 'ih-estate') x.value = '0'; update(); });
+    });
     $('calc').querySelectorAll('input, select').forEach(x => x.addEventListener('input', update));
     update();
   }
+}
+// A whole number only: digits, no sign or decimal point, no leading zeros ("00001" becomes "1"), never above its limit.
+function cleanCount(input) {
+  const max = Number(input.dataset.max) || 0;
+  let d = input.value.replace(/\D/g, '').replace(/^0+(?=\d)/, '');
+  if (d !== '' && Number(d) > max) d = String(max);
+  if (input.value !== d) input.value = d;
 }
 
 // ===========================================================================
