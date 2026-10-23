@@ -62,4 +62,34 @@ const c = CITES['1989 SC 166'];
 if (!c || c.display !== 'PLD 1989 SC 166' || JSON.stringify(c.refs) !== '{"a":["4"],"b":["7"]}') { fails++; console.log('FAIL index ' + JSON.stringify(c)); }
 const linked = linkCitations('relied on 1989 SC 166 and 2019 SCMR 1');
 if (!linked.includes('data-cite="1989 SC 166"') || linked.includes('2019 SCMR 1"')) { fails++; console.log('FAIL link ' + linked); }
+// The precedent map's layout: the same input gives the same picture, inside its box.
+eval(grab('layoutGraph').split('const ').join('var '));
+const mkNodes = () => Array.from({length: 9}, (_, i) => ({id: i}));
+const mkEdges = [[0, 1], [1, 2], [2, 3], [3, 4], [5, 6], [6, 7], [7, 8], [8, 5]];
+const a = mkNodes(), b = mkNodes();
+layoutGraph(a, mkEdges, 300, 300, 200); layoutGraph(b, mkEdges, 300, 300, 200);
+const stable = a.every((n, i) => n.x === b[i].x && n.y === b[i].y);
+const inside = a.every(n => n.x >= 44 && n.x <= 256 && n.y >= 30 && n.y <= 270);
+const apart = a.every((n, i) => a.every((m, j) => i === j || Math.hypot(n.x - m.x, n.y - m.y) > 8));
+[['deterministic', stable], ['inside its box', inside], ['no two nodes on top of each other', apart]].forEach(([name, ok]) => {
+  if (!ok) fails++;
+  console.log((ok ? 'ok   ' : 'FAIL ') + 'map layout is ' + name);
+});
+// Listen: what is read aloud, and which voice reads it.
+eval(['speechText', 'speechChunks', 'pickVoice'].map(grab).join('\n').split('const ').join('var '));
+const spoken = speechText('## Answer\n\nThe court held **bail** may be cancelled [S1][S3].\n\n- First point [S2]\n- Second point\n\n| a | b |\n|---|---|\n| x | y |\n');
+const okSpoken = spoken === 'Answer. The court held bail may be cancelled. First point. Second point.' ||
+                 spoken === 'Answer. The court held bail may be cancelled . First point. Second point.';
+const long = Array.from({length: 40}, (_, i) => 'Sentence number ' + i + ' of the answer.').join(' ');
+const chunks = speechChunks(long, 220);
+const voices = [{name: 'Microsoft Zira', lang: 'en-US', localService: true}, {name: 'Microsoft Uzma Online (Natural) - Urdu (Pakistan)', lang: 'ur-PK', localService: false},
+                {name: 'Google हिन्दी', lang: 'hi-IN', localService: false}];
+const checks = [
+  ['text strips citations, markdown and tables', okSpoken],
+  ['long text is cut at sentence ends, in pieces under the limit', chunks.length > 1 && chunks.every(c => c.length <= 260) && chunks.join(' ').replace(/\s+/g, ' ') === long],
+  ['an Urdu voice is chosen for Urdu', pickVoice(voices, 'ur').lang === 'ur-PK'],
+  ['an English voice is chosen for English', pickVoice(voices, 'en').name === 'Microsoft Zira'],
+  ['no voice means no Listen button', pickVoice([voices[0]], 'ur') === null],
+];
+checks.forEach(([name, ok]) => { if (!ok) fails++; console.log((ok ? 'ok   ' : 'FAIL ') + 'listen: ' + name); if (!ok && name.startsWith('text')) console.log(JSON.stringify(spoken)); });
 process.exit(fails ? 1 : 0);

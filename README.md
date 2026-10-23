@@ -14,6 +14,7 @@ Supreme Court, Sindh and Islamabad High Court formats too, but those are not yet
 
 > Built for the **4th International AI Championship (AIEF, 2026)**, category *Intelligent App Creation*.
 > See [PROPOSAL.md](PROPOSAL.md) for the full project proposal.
+> A one-page summary for judges is in [SUBMISSION.md](SUBMISSION.md); the measured results are in [EVALUATION.md](EVALUATION.md).
 
 ## Features
 
@@ -24,6 +25,21 @@ Supreme Court, Sindh and Islamabad High Court formats too, but those are not yet
 - **Conversational memory:** follow-ups like *"what was the verdict in that case?"* work
 - **Plain-language summaries** and **side-by-side case comparison**
 - **Incremental indexing:** only new PDFs get processed
+- **Agent room (orchestrator and agents):** any request goes to an orchestrator, which decides what kind of job it is
+  and deploys a team for it: a situation (research, statutes, precedents, strategy, drafting, verifier), a question
+  (research, statutes, precedents, counter-argument, plain-language explainer, verifier), a judgment (reader, timeline,
+  statutes, precedents, similar judgments, verifier), a document (reader, research, statutes, precedents, drafting,
+  verifier) or two judgments to compare (two readers, comparator, statutes, precedents, verifier). The page draws the
+  team as a live graph: each node working, data moving along the edges as one agent hands to another, and each agent
+  marked as using the model or fixed rules
+- **Workspace (`/workspace`):** a Harvey-style workspace, for a lawyer's matter or a person's own case. The assistant
+  answers from the case law or from the matter's own papers; the vault holds the papers (read in memory by
+  `POST /api/extract`, kept in the browser, never stored on the server) for a cited review table, a chronology or an
+  explanation; workflows (bail application, notices, FIR application, superdari, strategy memo, hearing preparation,
+  chronology, client letter, review table, briefs, comparisons; and for people: what to do, am I too late, inheritance)
+  start from the matter's facts; everything run is kept in the matter's history
+- **The agents at work:** every page shows which agents handled the request as they work (router, search, writers,
+  reviewers, fact checker), with each writer's words as the model produces them and how long each took
 - **Web app pages:** Ask, Summarize, Compare (two judgments, or a cited review table of many judgments and
   your own documents), Explain (your FIR, notice or order, with red flags), Draft (documents, optionally in
   your own style, and workflows: strategy memo, hearing preparation, chronology, client letter), Guides,
@@ -32,6 +48,15 @@ Supreme Court, Sindh and Islamabad High Court formats too, but those are not yet
   section, number and quotation in the cited paragraph; statutes (Constitution, PPC, CrPC, CPC, family
   laws) open word for word from official copies; case citations open the library judgments that rely on them
 - **Urdu and English voice input**, and a **provider fallback** (Gemini and OpenAI stand in for each other)
+- **Pitch page** (`/pitch`): the problem, what it does, the evidence and its limits on one page, for judges
+- **Guided tour:** a 90-second walkthrough that runs a real example and highlights each feature, for anyone
+  opening the link without a presenter (button on the home page, or `/?tour=1`)
+- **Ask one judgment:** open a judgment in the Library and ask questions answered from that judgment alone,
+  citing its paragraphs
+- **Precedent map:** a graph of the library's judgments and the reported cases two or more of them rely on,
+  built from the indexed citations (no AI)
+- **Listen:** answers read aloud by the browser's own voices, where the browser has one for the language
+  (English nearly everywhere; Urdu in Edge and wherever an Urdu voice is installed)
 
 ## Architecture
 
@@ -94,7 +119,7 @@ The first run downloads the embedding model and indexes every PDF. Later runs on
 | `WAKEEL_PROVIDER` | `gemini` | Chat model provider: `gemini` or `openai`. |
 | `OPENAI_API_KEY` | — | Required when `WAKEEL_PROVIDER=openai`. From [OpenAI](https://platform.openai.com/api-keys). |
 | `WAKEEL_MODEL` | `gemini-3.5-flash` / `gpt-4o-mini` | Chat model; the default depends on the provider. `gemini-2.5-flash` is retired for new keys. |
-| `WAKEEL_FALLBACK` | on | When the other provider's key is also set, a failed or hung call (quota, outage) is answered by the other provider instead. Set to `0` to turn off. |
+| `WAKEEL_FALLBACK` | on | When the other provider's key is also set, a failed or hung call (quota, outage) is answered by the other provider instead. Also asks the other provider once when the main model answers "Not found" although passages were retrieved. Set to `0` to turn both off. |
 | `WAKEEL_TIMEOUT` | `90` | Seconds one request to the main provider may take before the fallback answers. |
 | `WAKEEL_VERBOSE` | off | Set to `1` to print routing decisions as the graph runs. |
 | `WAKEEL_LEGACY_CHUNKING` | off | Set to `1` to restore the original chunking behaviour. |
@@ -122,7 +147,7 @@ curl -s http://127.0.0.1:8000/api/chat -H "Content-Type: application/json" \
 
 Main endpoints: `POST /api/chat` (and `/api/chat/stream` for live agent steps),
 `/api/summarize`, `/api/compare`, `/api/table`, `/api/explain`, `/api/explain/ask`, `/api/draft`,
-`/api/workflow`, `/api/feedback`; `GET /api/judgments`, `/api/judgments/<doc_id>`, `/api/statutes`,
+`/api/workflow`, `/api/judgment/ask`, `/api/case/stream`, `/api/feedback`; `GET /api/judgments`, `/api/judgments/<doc_id>`, `/api/statutes`,
 `/api/citations`, `/api/insights`, `/api/activity`, `/api/stats`.
 
 ### Use Wakeel AI from Claude or ChatGPT (MCP)
@@ -188,7 +213,8 @@ not depend on it — it affects the case/party/judge labels shown alongside resu
 
 ## Roadmap
 
-Full details are in [PROPOSAL.md](PROPOSAL.md#5-key-features--deliverables). Ticked items are built and tested.
+Full details are in [PROPOSAL.md](PROPOSAL.md#5-key-features--deliverables). Ticked items are built and
+tested on the `ui-redesign` branch.
 
 **Round 2: Screening**
 - [x] Web application with a source-paragraph panel (a dependency-free server rather than Streamlit)
@@ -203,7 +229,7 @@ Full details are in [PROPOSAL.md](PROPOSAL.md#5-key-features--deliverables). Tic
 - [ ] Cross-encoder re-ranking and Reciprocal Rank Fusion (not needed so far: hybrid search already finds
       the right judgment in the top 10 for 99.5% of the 50 test questions)
 - [x] Statute linker: the Constitution, PPC, CrPC, CPC and the main family laws, word for word with sources
-- [x] Evaluation benchmark: Recall@k and MRR (`evaluate_retrieval.py`), plus a citation fact check on
+- [x] Evaluation benchmark: Recall@k and MRR ([EVALUATION.md](EVALUATION.md)), plus a citation fact check on
       every answer
 
 **Final Round**

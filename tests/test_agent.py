@@ -5,6 +5,7 @@ Run:  .venv/bin/python -m pytest tests/ -v
 
 Uses a fake LLM and fake retrieval, so no API key, Chroma or embedding model.
 """
+import json
 import os
 import sys
 import types
@@ -59,6 +60,54 @@ def fake_search_hybrid(query, top_k=10, alpha=0.5):
 def make_agent(llm=None, thread="t"):
     W.search_hybrid = fake_search_hybrid
     return W.WakeelAgent(llm or FakeLLM(), thread_id=thread)
+
+
+# --------------------------------------------------------------------------
+# A second opinion when the main model refuses to answer from retrieved passages
+# --------------------------------------------------------------------------
+
+class NotFoundLLM(FakeLLM):
+    """Refuses every answer prompt, as an over-cautious model does."""
+    def invoke(self, prompt):
+        self.calls.append(prompt)
+        return types.SimpleNamespace(content="Not found in the indexed judgments. Narrow the search.")
+
+
+class AnswersLLM(FakeLLM):
+    def invoke(self, prompt):
+        self.calls.append(prompt)
+        return types.SimpleNamespace(content="The court held that bail may be cancelled [S1].")
+
+
+def _second_opinion_run(main, second, thread):
+    PLAN.clear()
+    PLAN["Find bail cases"] = {"route": "GQ", "restated_query": "bail cases"}
+    W.search_hybrid = fake_search_hybrid
+    agent = W.WakeelAgent(main, thread_id=thread, second_opinion=second)
+    return agent.run_detailed("Find bail cases")
+
+
+def test_second_opinion_answers_when_the_main_model_refuses():
+    main, second = NotFoundLLM(), AnswersLLM()
+    out = _second_opinion_run(main, second, "second-1")
+    assert out["answer"].startswith("The court held") and out["grounded"] and out["sources"]
+    assert len(second.calls) == 1 and "read every excerpt again" in second.calls[0]
+    assert len([c for c in main.calls if "Retrieved excerpts" in str(c)]) == 2     # first try and the recheck
+
+
+def test_second_opinion_keeps_the_refusal_if_it_also_refuses_or_fails():
+    class Fails(FakeLLM):
+        def invoke(self, prompt):
+            raise RuntimeError("503 UNAVAILABLE")
+    for second in (NotFoundLLM(), Fails(), None):
+        out = _second_opinion_run(NotFoundLLM(), second, f"second-{type(second).__name__}")
+        assert "Not found in the indexed judgments" in out["answer"] and out["grounded"] is False
+
+
+def test_second_opinion_is_not_asked_when_the_main_model_answers():
+    second = AnswersLLM()
+    out = _second_opinion_run(AnswersLLM(), second, "second-unused")
+    assert out["grounded"] and second.calls == []
 
 
 # --------------------------------------------------------------------------
@@ -356,6 +405,24 @@ def test_review_table_cites_each_cell_with_sources_numbered_across_judgments():
         assert len(out["sources"]) == 20 and "| Bail cancelled [S1] |" in out["answer"]
         assert agent.review_table([], ["Outcome"])["route"] == "ERROR"
         assert agent.review_table(["lhc_a", "missing"], ["Outcome"])["route"] == "ERROR"
+    finally:
+        W.METADATA_DIR = saved
+
+
+def test_ask_judgment_answers_from_one_judgment_and_cites_its_paragraphs():
+    saved, W.METADATA_DIR = W.METADATA_DIR, _fake_corpus()
+    try:
+        llm = AnswersLLM()
+        agent = W.WakeelAgent(llm, thread_id="ask-judgment")
+        out = agent.ask_judgment("lhc_a", "Why was bail cancelled?", mode="lawyer")
+        prompt = llm.calls[-1]
+        assert out["route"] == "JUDGMENT" and out["grounded"] and len(out["sources"]) == 10
+        assert "Why was bail cancelled?" in prompt and "Answer only from this one judgment" in prompt
+        assert "lhc_a paragraph 3" in prompt and "lhc_b" not in prompt          # that judgment's text, not another's
+        assert agent.ask_judgment("lhc_a", "  ")["route"] == "ERROR"
+        assert agent.ask_judgment("missing", "Why?")["route"] == "ERROR"
+        refused = W.WakeelAgent(NotFoundLLM(), thread_id="ask-judgment-2").ask_judgment("lhc_a", "Unrelated?")
+        assert refused["grounded"] is False and "Not found" in refused["answer"]
     finally:
         W.METADATA_DIR = saved
 
@@ -738,3 +805,218 @@ def test_an_urdu_document_searches_english_judgments_with_english_terms():
     assert terms.startswith("section 154 CrPC section 489-F PPC")
     assert "cheque dishonoured" in terms and "loan" in terms
     assert W.urdu_search_terms("FIR under section 489-F PPC for a bounced cheque") == ""   # English: unchanged
+
+
+class CaseLLM(FakeLLM):
+    """Plays the agent room's model calls: the orchestrator's JSON, then a cited answer for every writer."""
+    def __init__(self, kind="situation", draft="cheque_notice", judgments=None, fail_on=None):
+        super().__init__()
+        self.kind, self.draft, self.judgments, self.fail_on = kind, draft, judgments or [], fail_on
+
+    def invoke(self, prompt):
+        self.calls.append(prompt)
+        if self.fail_on and self.fail_on in str(prompt):
+            raise RuntimeError("503 UNAVAILABLE")
+        if "You are the orchestrator" in str(prompt):
+            return types.SimpleNamespace(content=json.dumps({
+                "kind": self.kind, "reason": "You need help with a bounced cheque.", "judgments": self.judgments,
+                "issue": "Remedies when a cheque given to repay a loan is dishonoured", "side": "complainant",
+                "facts": ["Lent Rs. 900,000", "Cheque bounced on 1 March 2024"], "provisions": ["Section 489-F PPC"],
+                "goal": "Recover the money", "dates": ["1 March 2024"], "draft": self.draft}))
+        return types.SimpleNamespace(content="The court held the cheque was dishonestly issued [S1].")
+
+
+def _room(llm, query="My cheque bounced", document="", doc_ids=None):
+    W.search_hybrid = fake_search_hybrid
+    agent = W.WakeelAgent(llm, thread_id="room")
+    return list(agent.agent_room(query, document, doc_ids, mode="citizen", language="en"))
+
+
+def _team(events):
+    return next(e for e in events if e["type"] == "team")
+
+
+def _done(events):
+    return {e["id"]: e for e in events if e.get("type") == "agent" and e.get("status") == "done"}
+
+
+def test_agent_room_situation_team_shares_one_set_of_passages():
+    llm = CaseLLM()
+    events = _room(llm, document="FIR No. 214/2024 under section 489-F PPC")
+    team = _team(events)
+    assert team["kind"] == "document"                                  # a document always gets the document team
+    events = _room(CaseLLM())
+    team = _team(events)
+    assert team["kind"] == "situation" and [a["id"] for a in team["team"]] == W.TEAMS["situation"][0]
+    assert ["research", "strategy"] in team["edges"] and all(len(e) == 2 for e in team["edges"])
+    assert events[-1] == {"type": "done"} and events[0]["id"] == "orchestrator"
+    done = _done(events)
+    assert {"orchestrator", "research", "strategy", "draft"} <= set(done)
+    assert done["research"]["result"]["sources"] == done["strategy"]["result"]["sources"] == done["draft"]["result"]["sources"]
+    handoffs = {(e["from"], e["id"]) for e in events if e.get("from")}
+    assert {("orchestrator", "research"), ("orchestrator", "statutes"), ("research", "precedents"),
+            ("research", "strategy"), ("research", "draft")} <= handoffs
+    assert all(tuple(h) in {tuple(e) for e in team["edges"]} for h in handoffs)   # every hand-off is an edge drawn
+
+
+def test_agent_room_question_team_runs_the_explainer_after_the_research():
+    events = _room(CaseLLM(kind="question"), "Can bail be cancelled on a compromise?")
+    team = _team(events)
+    assert team["kind"] == "question" and "counter" in [a["id"] for a in team["team"]]
+    done = _done(events)
+    assert {"research", "counter", "explainer"} <= set(done)
+    order = [e["id"] for e in events if e.get("status") == "done"]
+    assert order.index("research") < order.index("explainer")
+    explainer_start = next(e for e in events if e.get("id") == "explainer" and e.get("status") == "working")
+    assert explainer_start["from"] == "research"
+
+
+def test_agent_room_reads_and_compares_chosen_judgments():
+    saved, W.METADATA_DIR = W.METADATA_DIR, _fake_corpus()
+    try:
+        one = _room(CaseLLM(), "", doc_ids=["lhc_a"])
+        assert _team(one)["kind"] == "judgment"
+        assert {"reader", "timeline", "similar"} <= set(_done(one))
+        assert _done(one)["similar"]["data"]["doc_ids"] and "lhc_a" not in _done(one)["similar"]["data"]["doc_ids"]
+        two = _room(CaseLLM(), "", doc_ids=["lhc_a", "lhc_b"])
+        assert _team(two)["kind"] == "compare"
+        assert {"reader_a", "reader_b", "comparator"} <= set(_done(two))
+        prec = next(e for e in two if e.get("id") == "precedents" and e.get("data"))
+        assert prec["data"]["doc_ids"] == ["lhc_a", "lhc_b"]
+    finally:
+        W.METADATA_DIR = saved
+
+
+def test_agent_room_falls_back_and_reports_failures():
+    # Asked to compare, but the judgments named cannot be found: it answers as a question instead.
+    W.WakeelAgent._resolve_judgment, saved = staticmethod(lambda name: ""), W.WakeelAgent._resolve_judgment
+    try:
+        events = _room(CaseLLM(kind="compare", judgments=["X v Y", "P v Q"]), "Compare X v Y with P v Q")
+        assert _team(events)["kind"] == "question"
+    finally:
+        W.WakeelAgent._resolve_judgment = saved
+    skipped = _room(CaseLLM(draft="not a kind"))
+    assert [e for e in skipped if e.get("id") == "draft"][0]["status"] == "skipped"
+    failed = _room(CaseLLM(fail_on="case strategy memo"))
+    assert [e for e in failed if e.get("id") == "strategy"][-1]["status"] == "failed"
+    assert "research" in _done(failed)                                      # the others still finish
+    nothing = _room(CaseLLM(), "  ")
+    assert nothing[1]["status"] == "failed" and nothing[-1] == {"type": "done"}
+    broken = _room(CaseLLM(fail_on="You are the orchestrator"))
+    assert broken[-2]["id"] == "orchestrator" and broken[-2]["status"] == "failed"
+
+
+class StreamingCaseLLM(CaseLLM):
+    """The same replies, given a few characters at a time, as a streaming chat model gives them."""
+    def stream(self, prompt):
+        text = self.invoke(prompt).content
+        for i in range(0, len(text), 7):
+            yield types.SimpleNamespace(content=text[i:i + 7])
+
+
+def test_agent_room_streams_each_agents_words_before_its_result():
+    saved, W.STREAM_FLUSH_CHARS = W.STREAM_FLUSH_CHARS, 10
+    try:
+        events = _room(StreamingCaseLLM(kind="question"), "Can bail be cancelled on a compromise?")
+    finally:
+        W.STREAM_FLUSH_CHARS = saved
+    done = _done(events)
+    for agent_id in ("research", "counter", "explainer"):
+        chunks = [i for i, e in enumerate(events) if e["type"] == "chunk" and e["id"] == agent_id]
+        assert len(chunks) > 1 and events[chunks[0]]["new"] and not events[chunks[1]]["new"]
+        finished = events.index(done[agent_id])
+        assert chunks[-1] < finished
+        assert "".join(events[i]["text"] for i in chunks) == done[agent_id]["result"]["answer"]
+    # The explainer's words only come after the research agent it works from has reported.
+    first_explainer_word = next(i for i, e in enumerate(events) if e["type"] == "chunk" and e["id"] == "explainer")
+    assert events.index(done["research"]) < first_explainer_word
+    assert not [e for e in events if e["type"] == "chunk" and e["id"] == "orchestrator"]    # its JSON is not streamed
+
+
+def test_a_watched_request_reports_each_agent_and_its_words_across_threads():
+    saved, W.METADATA_DIR = W.METADATA_DIR, _fake_corpus()
+    log = []
+    watch, token = W.watch_begin(log.append)
+    try:
+        agent = make_agent(RowLLM(), thread="table")
+        agent.llm.stream = lambda prompt: iter([types.SimpleNamespace(content=agent.llm.invoke(prompt).content)])
+        agent.review_table(["lhc_a", "lhc_b"], ["Outcome"])
+    finally:
+        W.watch_end(token)
+        W.METADATA_DIR = saved
+    assert watch.log == log
+    stages = {(e["id"], e["status"]) for e in log if e["type"] == "stage"}
+    assert {("load-lhc_a", "done"), ("load-lhc_b", "done"), ("row-lhc_a", "working"), ("row-lhc_a", "done"),
+            ("row-lhc_b", "done")} <= stages                         # each reviewer reports from its own thread
+    assert {e["id"] for e in log if e["type"] == "chunk"} == {"row-lhc_a", "row-lhc_b"}
+    assert next(e for e in log if e["id"] == "row-lhc_a")["name"].startswith("Reviewer · ")
+    assert W.watching() is None
+    log.clear()
+    make_agent(RowLLM(), thread="t2").review_table(["lhc_a"], ["Outcome"])   # nobody watching: nothing reported
+    assert log == []
+
+
+
+class CitatorLLM(FakeLLM):
+    def invoke(self, prompt):
+        self.calls.append(prompt)
+        if "You are a legal citator" in str(prompt):
+            return types.SimpleNamespace(content=json.dumps([
+                {"n": 1, "treatment": "followed", "reason": "Applied to grant bail.", "quote": "lhc_a paragraph 3"},
+                {"n": 2, "treatment": "overruled-ish", "reason": "Unclear.", "quote": "words that are not there"}]))
+        return super().invoke(prompt)
+
+
+def test_citator_labels_each_judgment_and_drops_quotes_it_cannot_find():
+    saved, W.METADATA_DIR = W.METADATA_DIR, _fake_corpus()
+    try:
+        agent = make_agent(CitatorLLM(), thread="cite")
+        out = agent.citator("2013 SCMR 1205", {"lhc_a": ["3"], "lhc_b": ["7"]})
+        assert out["route"] == "CITATOR" and len(out["results"]) == 2
+        a, b = out["results"]
+        assert a == {"doc_id": "lhc_a", "paragraph": "3", "treatment": "followed", "reason": "Applied to grant bail.",
+                     "quote": "lhc_a paragraph 3", "quote_found": True}
+        assert b["treatment"] == "mentioned" and b["quote"] == "" and not b["quote_found"]   # unknown label, unfound quote
+        assert "lhc_b paragraph 7" in agent.llm.calls[-1]                                    # the citing paragraph was read
+        assert out["counts"]["followed"] == 1 and "1 followed" in out["answer"]
+        assert agent.citator("", {"lhc_a": ["1"]})["route"] == "ERROR"
+        assert agent.citator("2013 SCMR 1205", {"missing": ["1"]})["route"] == "ERROR"
+    finally:
+        W.METADATA_DIR = saved
+
+
+def test_opposing_counsel_and_custom_workflows_research_and_cite():
+    agent = make_agent(thread="opp")
+    out = agent.run_workflow("opponent", {"Your draft or argument": "The cheque was security, so 489-F does not apply."})
+    prompt = agent.llm.calls[-1]
+    assert out["route"] == "OPPONENT" and "You are opposing counsel" in prompt and "The cheque was security" in prompt
+    assert out["sources"]                                                         # it searched the judgments
+    out = agent.run_workflow("custom", {"Instructions": "List my bail grounds as numbered points", "Facts": "489-F, in custody"})
+    assert out["route"] == "CUSTOM" and "do not apply" in agent.llm.calls[-1] and "List my bail grounds" in agent.llm.calls[-1]
+
+
+
+def test_moot_court_asks_one_question_a_turn_then_gives_feedback():
+    agent = make_agent(thread="moot")
+    first = agent.moot_turn("Accused under 489-F; cheque was security.", "accused", "a bail application", [])
+    prompt = agent.llm.calls[-1]
+    assert first["route"] == "MOOT" and not first["done"] and first["question"] == 1 and first["of"] == 5
+    assert "ask ONE new question" in prompt and "the hearing has not started" in prompt and first["sources"]
+    history = [{"role": "judge", "text": "Why is this not within the prohibitory clause?"},
+               {"role": "counsel", "text": "The maximum sentence is three years."}]
+    agent.moot_turn("Accused under 489-F.", "accused", "a bail application", history)
+    assert "COUNSEL: The maximum sentence is three years." in agent.llm.calls[-1]
+    end = agent.moot_turn("Accused under 489-F.", "accused", "a bail application", history, finish=True)
+    assert end["done"] and "## Score" in agent.llm.calls[-1]
+    many = [{"role": r, "text": "x"} for _ in range(5) for r in ("judge", "counsel")]
+    assert agent.moot_turn("Facts.", "accused", "bail", many)["done"]          # five questions, then feedback
+    assert agent.moot_turn("", "accused", "bail", [])["route"] == "ERROR"
+
+
+def test_evidence_check_reads_the_papers_whole():
+    agent = make_agent(thread="ev")
+    papers = "=== FIR ===\n" + "The cheque was dishonoured on 1 March 2024. " * 300
+    out = agent.run_workflow("evidence", {"Draft": "The cheque bounced on 5 March 2024.", "Papers": papers})
+    prompt = agent.llm.calls[-1]
+    assert out["route"] == "EVIDENCE" and "Not in the papers" in prompt and "bounced on 5 March 2024" in prompt
+    assert prompt.count("dishonoured on 1 March 2024") > 150                    # more than the 6,000 characters a fact gets

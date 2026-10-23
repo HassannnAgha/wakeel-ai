@@ -17,6 +17,6 @@ def test_calculators_against_worked_cases():
         import pytest
         pytest.skip("Node.js is not installed")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calculators_test.js")
-    run = subprocess.run([node, script], capture_output=True, text=True, timeout=60)
+    run = subprocess.run([node, script], capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert run.returncode == 0, run.stdout + run.stderr
     assert "FAIL" not in run.stdout

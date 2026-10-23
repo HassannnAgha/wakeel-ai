@@ -325,8 +325,31 @@ class TableStubAgent(StubAgent):
     def strategy_memo(self, facts, mode=None, language=None):
         return {"answer": "memo on " + ", ".join(sorted(facts)), "route": "STRATEGY", "sources": [], "grounded": True}
 
+    def agent_room(self, situation, document="", doc_ids=None, mode=None, language=None):
+        yield {"type": "team", "kind": "situation", "team": [{"id": "orchestrator", "name": "Orchestrator", "role": "r", "ai": True}],
+               "edges": [], "reason": "r", "brief": {}, "doc_ids": doc_ids or []}
+        yield {"type": "agent", "id": "orchestrator", "status": "done",
+               "note": f"read {situation!r}, {len(document)} chars and {len(doc_ids or [])} judgments"}
+        yield {"type": "done"}
+
+    def ask_judgment(self, doc_id, question, mode=None, language=None):
+        return {"answer": f"{question} about {doc_id}", "route": "JUDGMENT", "sources": [], "grounded": True}
+
     def run_workflow(self, kind, facts, mode=None, language=None, doc_id=""):
         return {"answer": f"{kind} on {sorted(facts)} {doc_id}".strip(), "route": kind.upper(), "sources": [], "grounded": False}
+
+
+def test_ask_judgment_endpoint():
+    server, _, base = start_server(TableStubAgent())
+    try:
+        status, data = post(base, "/api/judgment/ask", {"doc_id": "lhc_1", "question": "Why?"})
+        assert status == 200 and data["answer"] == "Why? about lhc_1" and data["route"] == "JUDGMENT"
+        assert post(base, "/api/judgment/ask", {"doc_id": "lhc_1", "question": " "})[0] == 400
+        assert post(base, "/api/judgment/ask", {"question": "Why?"})[0] == 400
+        page = ui.PAGE
+        assert 'id="ask-scope"' in page and "/api/judgment/ask" in page and 'data-act="ask"' in page
+    finally:
+        server.shutdown()
 
 
 def test_workflow_endpoint():
@@ -443,14 +466,14 @@ def test_statute_linker():
         import pytest
         pytest.skip("Node.js is not installed")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "linker_test.js")
-    run = subprocess.run([node, script], capture_output=True, text=True, timeout=60)
+    run = subprocess.run([node, script], capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert run.returncode == 0, run.stdout + run.stderr
 
 
 def test_new_pages_are_served():
     server, _, base = start_server()
     try:
-        for path in ("/draft", "/guides", "/calculate", "/matters", "/developers"):
+        for path in ("/draft", "/guides", "/calculate", "/matters", "/pitch", "/developers"):
             status, body = get(base, path)
             assert status == 200 and f'data-page="{path[1:]}"' in body, path
     finally:
@@ -635,7 +658,7 @@ def test_fact_check():
         import pytest
         pytest.skip("Node.js is not installed")
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "factcheck_test.js")
-    run = subprocess.run([node, script], capture_output=True, text=True, timeout=60)
+    run = subprocess.run([node, script], capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert run.returncode == 0, run.stdout + run.stderr
 
 
@@ -671,3 +694,152 @@ def test_activity_log_counts_features_and_votes_but_never_content(tmp_path=None)
         assert "secret" not in log.path.read_text(encoding="utf-8")       # content is never logged
     finally:
         server.shutdown()
+
+
+def test_simulated_replay_waits_like_the_model_and_is_off_by_default(monkeypatch):
+    import tempfile
+    waits = []
+    monkeypatch.setattr(ui.time, "sleep", lambda s: waits.append(s))
+    agent = StreamingStubAgent()
+    cache = ui.AnswerCache(tempfile.mkdtemp())
+    handler = ui.make_handler(agent, lambda: "ok", stats_fn=lambda: {}, cache=cache, replay_delay=0, simulate=True)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        post_lines(base, "/api/chat/stream", {"message": "hello", "thread_id": "a"})
+        waits.clear()
+        post_lines(base, "/api/chat/stream", {"message": "hello", "thread_id": "b"})
+        assert len(agent.seen) == 1                       # still served from the cache
+        assert waits and all(w >= 0.8 for w in waits)     # ... but each step took a believable time
+    finally:
+        server.shutdown()
+
+
+def test_answer_reveal_helpers():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is not installed")
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reveal_test.js")
+    run = subprocess.run([node, script], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_the_tour_points_at_things_that_exist():
+    page = ui.PAGE
+    block = page[page.index("const TOUR = ["): page.index("let tourI = -1")]
+    paths = re.findall(r"path: '([^']+)'", block)
+    targets = re.findall(r"target: '([^']+)'", block)
+    assert len(paths) == len(targets) >= 8
+    for path in paths:
+        assert path in ui.APP_PATHS, path
+    for target in targets:
+        for token in target.split():                             # e.g. "#thread .body .ground", ".home-l h1"
+            if token.startswith("#"):
+                assert f'id="{token[1:]}"' in page, target
+            elif token.startswith("."):
+                name = token[1:]
+                assert re.search(r'class="[^"]*\b' + re.escape(name) + r'\b|[\'"]' + re.escape(name) + r'\b', page), target
+    assert 'id="tour-start"' in page and "params.get('tour')" in page
+
+
+def test_pitch_page_states_only_what_the_evaluation_supports():
+    page = ui.PAGE
+    block = page[page.index('data-page="pitch"'): page.index("<!-- LIBRARY -->")]
+    assert "99.5%" in block and "0.97" in block                      # EVALUATION.md's retrieval numbers
+    assert "1,687" in block                                          # statute provisions, as built
+    assert "not been reviewed by a lawyer" in block and "Not legal advice" in block
+    assert "stored" in block                                         # the privacy claim is stated
+    assert "49" not in block                                         # the corpus size comes from the live stats
+    assert "EVALUATION.md" in block and "github.com" not in block    # the repository may be private: no link to it
+
+
+def test_case_desk_endpoint_streams_the_team():
+    server, _, base = start_server(TableStubAgent())
+    try:
+        events = post_lines(base, "/api/case/stream", {"situation": "My cheque bounced", "text": "FIR No. 1"})
+        assert [e["type"] for e in events] == ["team", "agent", "done"]
+        assert events[1]["note"] == "read 'My cheque bounced', 9 chars and 0 judgments"
+        events = post_lines(base, "/api/case/stream", {"doc_ids": ["lhc_1", "lhc_2"]})     # judgments chosen in the Library
+        assert events[1]["note"] == "read '', 0 chars and 2 judgments"
+        assert post(base, "/api/case/stream", {"situation": " "})[0] == 400
+        page = ui.PAGE
+        assert 'data-page="case"' in page and 'data-nav="case"' in page and "openCase(" in page
+    finally:
+        server.shutdown()
+
+
+def test_case_desk_samples_match_the_demo_cache_steps():
+    import pytest
+    demo_prep = pytest.importorskip("demo_prep")   # demo files are kept out of the public repo
+    cases = [p for label, path, p in demo_prep.STEPS if path == "/api/case/stream"]
+    assert cases, "demo_prep.py should fill the cache for the case desk"
+    for payload in cases:
+        assert payload["situation"] in ui.PAGE, "the case desk's Try button must send exactly this text"
+
+
+class WatchedStubAgent(TaskStubAgent):
+    """Reports its agents as the real one does: a reader, then a writer whose words come in pieces."""
+    def summarize_judgment(self, doc_id, mode=None, language=None):
+        ui.W.watch_stage("load-" + doc_id, "Judgment reader", "done", "Read 3 passages")
+        ui.W.watch_stage("write", "Summary agent", "working", "Writing", ai=True)
+        for i, piece in enumerate(["summary ", "of ", doc_id]):
+            ui.W.watch_emit({"type": "chunk", "id": "write", "text": piece, "new": i == 0})
+        ui.W.watch_stage("write", "Summary agent", "done", "Wrote 3 words", ai=True)
+        return super().summarize_judgment(doc_id, mode, language)
+
+
+def test_a_page_can_watch_the_agents_work_and_replays_show_the_same():
+    agent = WatchedStubAgent()
+    server, cache, base = start_cached_server(agent)
+    try:
+        events = post_lines(base, "/api/summarize", {"doc_id": "lhc_1", "watch": True})
+        assert [e["type"] for e in events] == ["stage", "stage", "chunk", "chunk", "chunk", "stage", "result"]
+        assert "".join(e["text"] for e in events if e["type"] == "chunk") == "summary of lhc_1"
+        assert events[-1]["status"] == 200 and events[-1]["answer"] == "summary of lhc_1" and "watch" not in events[-1]
+        again = post_lines(base, "/api/summarize", {"doc_id": "lhc_1", "watch": True})     # from the cache
+        assert len(agent.styles) == 1 and [e["type"] for e in again] == [e["type"] for e in events]
+        status, data = post(base, "/api/summarize", {"doc_id": "lhc_1"})                    # not watching: plain JSON
+        assert status == 200 and "watch" not in data
+        refused = post_lines(base, "/api/compare", {"doc_a": "lhc_1", "watch": True})
+        assert refused == [{"type": "result", "status": 400, "answer": "Choose a judgment first.", "route": "ERROR", "sources": []}]
+    finally:
+        server.shutdown()
+
+
+def test_extract_returns_a_files_text_and_keeps_nothing():
+    server, agent, base = start_server(StubAgent())
+    try:
+        status, data = post(base, "/api/extract", {"filename": "notice.txt", "text": "  LEGAL NOTICE under section 489-F PPC  "})
+        assert status == 200 and data["text"] == "LEGAL NOTICE under section 489-F PPC" and data["chars"] == 36
+        assert data["filename"] == "notice.txt" and data["ocr"] is False
+        status, data = post(base, "/api/extract", {"filename": "empty.txt", "text": "   "})
+        assert status == 400
+    finally:
+        server.shutdown()
+
+
+def test_calendar_helpers():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is not installed")
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calendar_test.js")
+    run = subprocess.run([node, script], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_brief_checker():
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("Node.js is not installed")
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "briefcheck_test.js")
+    run = subprocess.run([node, script], capture_output=True, text=True, encoding="utf-8", timeout=60)
+    assert run.returncode == 0, run.stdout + run.stderr
+
+
+def test_helplines_are_the_checked_ones_and_dial():
+    page = ui.PAGE
+    block = page[page.index("const HELPLINES = ["): page.index("function helpStrip()")]
+    for number, tel in (("1818", "tel:1818"), ("0800-70806", "tel:080070806"), ("1099", "tel:1099"), ("15", "tel:15")):
+        assert f"'{number}', '{tel}'" in block
+    assert "Built to Pakistan's judicial AI guidelines" in page and 'id="voice-mic"' in page
