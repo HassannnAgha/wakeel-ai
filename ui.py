@@ -44,9 +44,9 @@ APP_PATHS = ("/", "/index.html", "/ask", "/summarize", "/compare", "/explain", "
              "/guides", "/calculate", "/library", "/matters", "/case", "/pitch", "/developers", "/workspace", "/court", "/verify")
 # Requests a page can watch: with "watch": true the answer comes as a stream of what each agent does, then the result.
 WATCHED_PATHS = ("/api/summarize", "/api/compare", "/api/explain", "/api/explain/ask", "/api/draft", "/api/table",
-                 "/api/table/ask", "/api/strategy", "/api/workflow", "/api/judgment/ask", "/api/citator", "/api/moot")
+                 "/api/table/ask", "/api/strategy", "/api/workflow", "/api/judgment/ask", "/api/citator", "/api/moot", "/api/video")
 POST_PATHS = ("/api/chat", "/api/chat/stream", "/api/summarize", "/api/compare", "/api/explain",
-              "/api/explain/ask", "/api/draft", "/api/table", "/api/table/ask", "/api/strategy", "/api/workflow", "/api/feedback", "/api/judgment/ask", "/api/case/stream", "/api/extract", "/api/citator", "/api/moot")
+              "/api/explain/ask", "/api/draft", "/api/table", "/api/table/ask", "/api/strategy", "/api/workflow", "/api/feedback", "/api/judgment/ask", "/api/case/stream", "/api/extract", "/api/citator", "/api/moot", "/api/speak", "/api/video", "/api/fill")
 
 #: Uploads arrive base64-encoded inside JSON, about a third larger than the file.
 UPLOAD_LIMIT = 10 * 1024 * 1024
@@ -375,6 +375,7 @@ PAGE = r"""<!doctype html>
   .court-ans { margin-top: 14px; }
   .court-ans .field { background: #161616; color: var(--white); border-color: var(--line-dark); }
   .court-ans .btn.line { color: var(--white); border-color: var(--line-dark); }
+  .court-ans [data-a="suggest"] { border-color: var(--marker); color: var(--marker); }
   .court-ans .mic { color: var(--marker); border-color: var(--line-dark); background: transparent; }
   .court-review { background: var(--beige); color: var(--ink); }
   .court-review:not(:empty) { padding: 18px 20px; margin-top: 16px; }
@@ -445,7 +446,55 @@ PAGE = r"""<!doctype html>
   .vf-chips button { border: 1px solid var(--line); background: var(--white); padding: 4px 10px; font-size: 12.5px; }
   .vf-chips button:hover { border-color: var(--black); }
   .vf-cite-h { margin: 18px 0 0; }
+  .fillbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 16px; }
+  .fillbox { flex-basis: 100%; background: var(--white); border: 1px solid var(--line); padding: 12px; }
+  .fillbox[hidden] { display: none; }
+  .fillnote { font-size: 13px; color: var(--muted); align-self: center; }
+  .vv-name { font-size: 13.5px; color: var(--rock); align-self: center; }
+  .vv-strip { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin: 12px 0 14px; }
+  .vv-strip:empty { display: none; }
+  .vv-strip figure { margin: 0; background: var(--black); animation: arrive .4s ease-out both; }
+  .vv-strip img { display: block; width: 100%; aspect-ratio: 16 / 10; object-fit: cover; }
+  .vv-check { margin: 22px 0 6px; }
+  .vv-verdict { border: 1px solid var(--black); border-left-width: 6px; padding: 12px 16px; margin: 0 0 18px; background: var(--white); }
+  .vv-verdict span { display: block; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); }
+  .vv-verdict b { display: block; font: 700 26px var(--display); letter-spacing: .03em; text-transform: uppercase; margin: 2px 0; }
+  .vv-verdict p { margin: 0; font-size: 14px; color: var(--rock); }
+  .vv-ok { border-left-color: var(--black); }
+  .vv-part { border-left-color: var(--sand); }
+  .vv-no { border-left-color: #a33a22; } .vv-no b { color: #a33a22; }
+  .vv-row { display: grid; grid-template-columns: 150px 1fr 150px; gap: 14px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .vv-row img { width: 150px; aspect-ratio: 16 / 10; object-fit: cover; display: block; background: var(--black); }
+  .vv-row b { font: 700 15px var(--display); letter-spacing: .06em; }
+  .vv-row p { margin: 2px 0 0; font-size: 14px; color: var(--rock); }
+  .vv-row em { font-style: normal; font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; text-align: center; padding: 3px 6px; border: 1px solid var(--black); }
+  .vv-seen em { background: var(--black); color: var(--white); }
+  .vv-partly em { background: var(--sand); }
+  .vv-not-seen em { background: #a33a22; color: var(--white); border-color: #a33a22; }
+  @media (max-width: 640px) { .vv-row { grid-template-columns: 100px 1fr; } .vv-row img { width: 100px; } .vv-row em { grid-column: 2; justify-self: start; } }
+  .vv-strip figcaption { color: var(--marker); font: 600 12px var(--display); letter-spacing: .08em; padding: 4px 6px; }
   @media (max-width: 640px) { .court-grid { grid-template-columns: 1fr; } .vf-citerow { flex-direction: column; } }
+
+  .vid { position: fixed; inset: 0; z-index: 75; background: rgba(10,10,10,.96); color: var(--white); overflow-y: auto; }
+  .vid-in { display: flex; gap: 40px; align-items: center; justify-content: center; min-height: 100%; padding: 50px 24px; }
+  .vid-stage canvas, .vid-stage video { height: min(78vh, 720px); aspect-ratio: 9 / 16; display: block; background: #000; box-shadow: 0 0 0 1px #2b2b2b, 0 20px 60px rgba(0,0,0,.6); }
+  .vid-stage [hidden] { display: none; }
+  .vid-side { max-width: 380px; }
+  .vid-side .eyebrow { color: var(--muted-dark); }
+  .vid-side h3 { font-size: 22px; margin: 8px 0 16px; }
+  .vid-steps { list-style: none; margin: 0 0 18px; padding: 0; font-size: 14px; }
+  .vid-steps li { padding: 8px 0 8px 22px; border-bottom: 1px solid #1c1c1c; position: relative; color: var(--muted-dark); }
+  .vid-steps li::before { content: ''; position: absolute; left: 0; top: 14px; width: 9px; height: 9px; border-radius: 50%; border: 1px solid var(--marker); }
+  .vid-steps li.on { color: var(--white); } .vid-steps li.on::before { background: var(--marker); animation: caret 1s steps(1) infinite; }
+  .vid-steps li.done { color: #dfe6ee; } .vid-steps li.done::before { background: var(--marker); }
+  .vid-acts { display: flex; flex-direction: column; gap: 8px; }
+  .vid-acts .btn { text-align: center; text-decoration: none; }
+  .vid-acts .btn:not(.line) { background: var(--marker); color: var(--black); border-color: var(--marker); }
+  .vid-acts .btn.line { color: var(--white); border-color: #2b2b2b; }
+  .vid-note { font-size: 11.5px; color: var(--muted-dark); margin-top: 16px; }
+  .rights-bar .rights-vid { border-left: 1px solid var(--marker); font-weight: 600; }
+  .vidbtn { font-weight: 600; }
+  @media (max-width: 760px) { .vid-in { flex-direction: column; gap: 18px; padding: 50px 14px 30px; } .vid-stage canvas, .vid-stage video { height: 62vh; } }
 
   /* ---------- home ---------- */
   .home { display: grid; grid-template-columns: 1.35fr 1fr; min-height: calc(100vh - 56px);
@@ -1453,6 +1502,20 @@ print(draft["answer"])</pre>
       <div class="auto-keys"><button type="button" id="auto-pause">Pause</button><button type="button" id="auto-next">Next</button><button type="button" id="auto-stop">Stop</button></div></div>
   </div>
 
+  <div class="vid" id="vid" hidden role="dialog" aria-label="Answer video">
+    <button type="button" class="voice-x" id="vid-x">Close</button>
+    <div class="vid-in">
+      <div class="vid-stage"><canvas id="vid-canvas" width="720" height="1280"></canvas><video id="vid-video" controls playsinline hidden></video></div>
+      <div class="vid-side">
+        <div class="eyebrow">Answer video · for WhatsApp</div>
+        <h3 id="vid-title">Making your video</h3>
+        <ol class="vid-steps" id="vid-steps"></ol>
+        <div class="vid-acts" id="vid-acts" hidden></div>
+        <p class="vid-note">The script is taken from the answer, word for word; the voice is OpenAI’s speech model. General information, not legal advice.</p>
+      </div>
+    </div>
+  </div>
+
   <section data-page="workspace">
     <div class="ws">
       <aside class="ws-side">
@@ -1540,7 +1603,8 @@ print(draft["answer"])</pre>
            and whether a case is still followed. The law check uses no AI.</p>
       </div>
       <div class="libtabs" id="vf-tabs"><button type="button" class="on" data-tab="law">Check the law</button>
-        <button type="button" data-tab="facts">Check the facts</button><button type="button" data-tab="case">Is a case still followed?</button></div>
+        <button type="button" data-tab="facts">Check the facts</button><button type="button" data-tab="case">Is a case still followed?</button>
+        <button type="button" data-tab="video">Check a video</button></div>
       <div class="vf-pane" data-pane="law">
         <div class="ws-formbox">
           <p class="ws-empty">Every section is looked up in the official text, every reported case in the library, every year against today.
@@ -1565,6 +1629,21 @@ print(draft["answer"])</pre>
             <button class="btn" type="button" id="vf-check">Check the facts</button></div>
         </div>
         <div id="vf-fout"></div>
+      </div>
+      <div class="vf-pane" data-pane="video" hidden>
+        <div class="ws-formbox">
+          <p class="ws-empty">A phone video of a police stop, a seizure or an incident. The video stays on this device: the browser takes
+             still frames from it and only those are read, then a timeline of what they show is checked against the judgments.
+             The sound is not used, and nothing is kept.</p>
+          <div class="ctas"><label class="btn line vf-add">Choose a video<input type="file" id="vv-file" accept="video/*" hidden></label>
+            <span class="vv-name" id="vv-name"></span></div>
+          <video id="vv-video" muted playsinline preload="auto" hidden></video>
+          <div class="vv-strip" id="vv-strip"></div>
+          <label class="eyebrow" for="vv-context">What it is, in your words (optional)</label>
+          <textarea class="field" id="vv-context" rows="2" dir="auto" placeholder="e.g. Police took my motorbike outside my shop in Gulberg on 2 October"></textarea>
+          <div class="ctas"><button class="btn" type="button" id="vv-go" disabled>Read the video</button></div>
+        </div>
+        <div id="vv-out"></div>
       </div>
       <div class="vf-pane" data-pane="case" hidden>
         <div class="ws-formbox">
@@ -2491,29 +2570,72 @@ function pickVoice(voices, lang) {
   const pool = (voices || []).filter(v => String(v.lang).toLowerCase().startsWith(lang));
   return pool.find(v => /natural|online/i.test(v.name)) || pool.find(v => v.localService) || pool[0] || null;
 }
+// Listen: a human voice from the server's speech model (each passage is made once and then replayed from the cache),
+// falling back to the browser's own voice if the server cannot make one.
+function playHuman(chunks, language, tone, hooks) {
+  let stopped = false, current = null;
+  const urls = [];
+  const clip = text => fetch('/api/speak', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                            body: JSON.stringify({text, language, tone})})
+    .then(r => { if (!r.ok) throw new Error('voice'); return r.blob(); })
+    .then(b => { const u = URL.createObjectURL(b); urls.push(u); return u; });
+  (async () => {
+    let next = clip(chunks[0]);
+    for (let i = 0; i < chunks.length && !stopped; i++) {
+      const url = await next;
+      if (i + 1 < chunks.length) { next = clip(chunks[i + 1]); next.catch(() => {}); }   // the next passage is made while this one plays
+      if (stopped) break;
+      await new Promise((resolve, reject) => {
+        const a = new Audio(url);
+        current = a;
+        a.onended = resolve;
+        a.onerror = () => reject(new Error('play'));
+        if (i === 0 && hooks.start) hooks.start();
+        a.play().catch(reject);
+      });
+    }
+    urls.forEach(u => URL.revokeObjectURL(u));
+    hooks.end(null);
+  })().catch(err => { urls.forEach(u => URL.revokeObjectURL(u)); hooks.end(stopped ? null : err); });
+  return {stop() { stopped = true; if (current) current.pause(); }};
+}
 function listenButton(data) {
-  const lang = data.language === 'ur' ? 'ur' : data.language === 'roman_ur' ? '' : 'en';
-  if (!lang || !('speechSynthesis' in window) || !speechText(data.answer)) return null;
+  const lang = ['en', 'ur', 'roman_ur'].includes(data.language) ? data.language : 'en';
+  if (!speechText(data.answer)) return null;
   const btn = el('button', 'copy', 'Listen');
   btn.type = 'button';
   btn.style.marginLeft = '0';
-  const sync = () => { btn.hidden = !pickVoice(speechSynthesis.getVoices(), lang); };
-  sync();
-  speechSynthesis.addEventListener('voiceschanged', sync);   // voices often arrive a moment after the page loads
-  const idle = () => { btn.textContent = 'Listen'; btn.classList.remove('listening'); };
-  btn.addEventListener('click', () => {
-    if (speechSynthesis.speaking || btn.classList.contains('listening')) { speechSynthesis.cancel(); idle(); return; }
-    const voice = pickVoice(speechSynthesis.getVoices(), lang);
-    if (!voice) return;
+  let human = null;
+  const idle = msg => {
+    btn.textContent = msg || 'Listen'; btn.classList.remove('listening'); human = null;
+    if (msg) setTimeout(() => { if (btn.textContent === msg) btn.textContent = 'Listen'; }, 2500);
+  };
+  const browserVoice = () => {
+    const code = lang === 'ur' ? 'ur' : 'en';
+    const voice = lang !== 'roman_ur' && 'speechSynthesis' in window ? pickVoice(speechSynthesis.getVoices(), code) : null;
+    if (!voice) { idle('Voice unavailable'); return; }
     speechSynthesis.cancel();
     const chunks = speechChunks(speechText(data.answer), 220);
     chunks.forEach((c, i) => {
       const u = new SpeechSynthesisUtterance(c);
       u.voice = voice; u.lang = voice.lang; u.rate = 0.95;
-      if (i === chunks.length - 1) { u.onend = idle; u.onerror = idle; }
+      if (i === chunks.length - 1) { u.onend = () => idle(); u.onerror = () => idle(); }
       speechSynthesis.speak(u);
     });
     btn.textContent = 'Stop'; btn.classList.add('listening');
+  };
+  btn.addEventListener('click', () => {
+    if (human || btn.classList.contains('listening')) {
+      if (human) human.stop();
+      if ('speechSynthesis' in window) speechSynthesis.cancel();
+      idle();
+      return;
+    }
+    btn.textContent = 'Preparing the voice…'; btn.classList.add('listening');
+    human = playHuman(speechChunks(speechText(data.answer), 600), lang, segValue('mode') === 'lawyer' ? 'formal' : 'plain', {
+      start() { btn.textContent = 'Stop'; },
+      end(err) { if (!err) { idle(); return; } human = null; btn.classList.remove('listening'); browserVoice(); },
+    });
   });
   return btn;
 }
@@ -2715,7 +2837,7 @@ function openRights(lang) {
   openPanel('<div class="rights" dir="' + (L ? 'rtl' : 'ltr') + '"><div class="eyebrow" dir="ltr">Rights right now · stopped or arrested</div>' +
     '<h2 class="display" dir="auto">' + (L ? 'گرفتاری کے وقت آپ کے حقوق' : 'Your rights if you are arrested') + '</h2>' +
     '<div class="rights-bar" dir="ltr"><button type="button" data-l="ur"' + (L ? ' class="on"' : '') + '>اردو</button><button type="button" data-l="en"' + (L ? '' : ' class="on"') +
-    '>English</button><button type="button" class="rights-say">' + (L ? 'سنیں' : 'Read aloud') + '</button></div>' +
+    '>English</button><button type="button" class="rights-say">' + (L ? 'سنیں' : 'Read aloud') + '</button><button type="button" class="rights-vid">' + (L ? 'ویڈیو بنائیں' : 'Make a video') + '</button></div>' +
     '<ol class="rights-do">' + RIGHTS_DO[lang].map(t => '<li>' + escapeHtml(t) + '</li>').join('') + '</ol>' +
     '<ul class="rights-list"></ul>' +
     '<p class="privacy" dir="ltr">Each right above quotes the official text of the Constitution or the Code of Criminal Procedure. General information, not legal advice.</p></div>');
@@ -2730,6 +2852,7 @@ function openRights(lang) {
   });
   panel.querySelector('.rights').appendChild(helpStrip());
   panel.querySelectorAll('.rights-bar [data-l]').forEach(b => b.addEventListener('click', () => openRights(b.dataset.l)));
+  panel.querySelector('.rights-vid').addEventListener('click', () => { closePanel(); makeVideo(rightsVideoScript(lang)); });
   const say = panel.querySelector('.rights-say');
   const voice = 'speechSynthesis' in window ? pickVoice(speechSynthesis.getVoices(), lang) : null;
   if (!voice) say.hidden = true;
@@ -3082,6 +3205,13 @@ function renderResult(container, data, key, query, opts) {
   }
   const cal = calendarButton(data, opts.print || query || 'Wakeel AI');
   if (cal) g.appendChild(cal);
+  if (!opts.noVideo && !['TABLE', 'CHECK', 'CITATOR', 'EVIDENCE', 'MOOT', 'ERROR', 'REJECT'].includes(data.route) && videoPoints(data.answer, 4).length >= 2) {
+    const v = el('button', 'copy vidbtn', segValue('mode') === 'lawyer' ? 'Make a video brief' : 'Make a video');
+    v.type = 'button'; v.style.marginLeft = '0';
+    v.title = 'A 30-second video of this answer, with captions and a voice, to send on WhatsApp';
+    v.addEventListener('click', () => makeVideo(videoScript(data, query || opts.print)));
+    g.appendChild(v);
+  }
   if (opts.print) {
     const pdf = el('button', 'copy', 'Save as PDF');
     pdf.type = 'button';
@@ -4014,7 +4144,8 @@ function wsMoot(cfg) {
   const out = cfg.out || $('ws-wout');
   out.innerHTML = '<div class="court"><div class="court-h"><span>Court in session · <b class="court-hearing"></b></span><span class="court-n"></span></div>' +
     '<ol class="court-log"></ol><div class="court-think"></div><form class="court-ans" hidden><textarea class="field" rows="3" dir="auto" placeholder="Your answer, my lord…"></textarea>' +
-    '<div class="ctas"><button class="mic" type="button" hidden></button><button class="btn" type="submit">Answer</button>' +
+    '<div class="ctas"><button class="mic" type="button" hidden></button><button class="btn line" type="button" data-a="suggest">Suggest an answer</button>' +
+    '<button class="btn" type="submit">Answer</button>' +
     '<button class="btn line" type="button" data-a="end">End and get feedback</button></div></form><div class="court-review"></div></div>';
   const box = out.firstChild, log = box.querySelector('.court-log'), form = box.querySelector('.court-ans'), field = form.querySelector('textarea');
   box.querySelector('.court-hearing').textContent = cfg.hearing;
@@ -4071,6 +4202,18 @@ function wsMoot(cfg) {
     turn(false);
   });
   form.querySelector('[data-a="end"]').addEventListener('click', () => { if (history.some(t => t.role === 'counsel')) turn(true); });
+  // Not a lawyer, or stuck? Counsel's reply, written from the facts and the judgments, to send as it is or edit.
+  const sug = form.querySelector('[data-a="suggest"]');
+  sug.addEventListener('click', async () => {
+    sug.disabled = true; const was = field.placeholder; field.value = ''; field.placeholder = 'Writing a suggested answer…';
+    let d;
+    try { d = await (await fetch('/api/moot', {method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({facts: cfg.facts, side: cfg.side, hearing: cfg.hearing, history, suggest: true, mode: segValue('mode'), language: segValue('language')})})).json(); }
+    catch (e) { d = {route: 'ERROR'}; }
+    sug.disabled = false; field.placeholder = was;
+    if (d.route !== 'ERROR' && d.answer) { field.value = plainWords(d.answer).replace(/\s+/g, ' ').trim(); field.focus(); }
+    else field.placeholder = 'No suggestion this time. Type your answer.';
+  });
   out.scrollIntoView({behavior: 'smooth', block: 'start'});
   turn(false);
 }
@@ -4345,6 +4488,8 @@ const AUTOPILOT = [
    }},
   {cap: 'For someone being arrested right now: their rights in Urdu, each in the Constitution’s own words, with free helplines.',
    run: async () => { openRights('ur'); await autoSleep(5000); const p = $('panel'); p.scrollTo({top: 420, behavior: 'smooth'}); await autoSleep(5000); closePanel(); }},
+  {cap: 'And any answer becomes a 30-second video in Urdu, with the law and the free helplines, ready to send on WhatsApp.',
+   run: async () => { makeVideo(rightsVideoScript('ur')); await autoUntil(() => !$('vid-acts').hidden, 90000); await autoSleep(5000); closeVideo(); }},
   {cap: 'Built to Pakistan’s 2026 judicial AI guidelines: people decide, every step is shown, every source is checked, nothing is stored.',
    run: async () => { go('/pitch'); await autoSleep(600); autoScroll(document.querySelector('.guide-map'), 140); await autoSleep(8000); }},
   {cap: 'Wakeel AI. Every answer traced to its paragraph.',
@@ -4490,6 +4635,89 @@ async function verifyCite(textOrKey) {
 $('vf-cite-go').addEventListener('click', () => verifyCite($('vf-cite').value.trim()));
 $('vf-cite').addEventListener('keydown', e => { if (e.key === 'Enter') verifyCite($('vf-cite').value.trim()); });
 $('vf-chips').addEventListener('click', e => { const b = e.target.closest('[data-k]'); if (b) verifyCite(b.dataset.k); });
+// Check a video: still frames are taken here, in the browser; the video itself is never uploaded.
+const VV = {frames: [], name: ''};
+async function videoFrames(file, most) {
+  const v = $('vv-video'), url = URL.createObjectURL(file);
+  try {
+    v.src = url;
+    await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej(new Error('This video cannot be read in this browser. Try an MP4 straight from the phone.')); });
+    const dur = Math.min(isFinite(v.duration) ? v.duration : 0, 180);
+    if (!dur || !v.videoWidth) throw new Error('This video has no pictures that can be read.');
+    const count = Math.max(2, Math.min(most, Math.ceil(dur / 2)));
+    const scale = 640 / Math.max(v.videoWidth, v.videoHeight), c = document.createElement('canvas');
+    c.width = Math.round(v.videoWidth * Math.min(1, scale)); c.height = Math.round(v.videoHeight * Math.min(1, scale));
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      const t = Math.min(dur - 0.05, dur * (i + 0.5) / count);
+      await new Promise(res => { v.onseeked = res; v.currentTime = t; });
+      c.getContext('2d').drawImage(v, 0, 0, c.width, c.height);
+      out.push({t: Math.round(t * 10) / 10, data: c.toDataURL('image/jpeg', 0.72)});
+    }
+    return out;
+  } finally { URL.revokeObjectURL(url); v.removeAttribute('src'); }
+}
+const vvTime = t => Math.floor(t / 60) + ':' + pad2(Math.floor(t % 60));
+$('vv-file').addEventListener('change', async e => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  VV.frames = []; VV.name = f.name; $('vv-go').disabled = true; $('vv-out').innerHTML = '';
+  $('vv-name').textContent = 'Reading ' + f.name + '…';
+  $('vv-strip').innerHTML = '';
+  try {
+    VV.frames = await videoFrames(f, 8);
+    $('vv-name').textContent = f.name + ' · ' + plural(VV.frames.length, 'frame') + ' taken, from 0:00 to ' + vvTime(VV.frames[VV.frames.length - 1].t);
+    $('vv-strip').innerHTML = VV.frames.map(fr => '<figure><img alt="" src="' + fr.data + '"><figcaption>' + vvTime(fr.t) + '</figcaption></figure>').join('');
+    $('vv-go').disabled = false;
+  } catch (err) { $('vv-name').textContent = err.message; }
+});
+$('vv-go').addEventListener('click', async () => {
+  if (!VV.frames.length) return;
+  const out = $('vv-out'), context = $('vv-context').value.trim();
+  out.innerHTML = '';
+  const target = out.appendChild(el('div'));
+  const data = await watchedPost('/api/video', {frames: VV.frames, context, mode: segValue('mode'), language: segValue('language')}, target, context);
+  renderResult(target, data, 'vv' + (++seq), data.restated_query || 'Video evidence', {noSave: true, whole: false, print: 'Video evidence: ' + VV.name});
+  // Does the video bear out what the person said? The verdict leads, in plain sight.
+  if (data.match && data.match.verdict) {
+    const v = data.match.verdict.toLowerCase(), kind = v === 'matches' ? 'ok' : v === 'partly matches' ? 'part' : 'no';
+    const banner = el('div', 'vv-verdict vv-' + kind);
+    banner.innerHTML = '<span>Does the video match what you said?</span><b></b><p></p>';
+    banner.querySelector('b').textContent = data.match.verdict;
+    banner.querySelector('p').textContent = data.match.reason;
+    target.prepend(banner);
+  }
+  // Frame by frame: each line of the timeline beside the frame it describes, with the checker's verdict, so anyone
+  // can see for themselves that it was in the video.
+  if (data.route !== 'ERROR' && (data.rows || []).length) {
+    const grid = el('div', 'vv-check');
+    grid.innerHTML = '<div class="eyebrow">Frame by frame · see it for yourself</div>';
+    data.rows.forEach((r, i) => {
+      const fr = VV.frames.find(f => vvTime(f.t) === r.t) || VV.frames[i];
+      const row = el('div', 'vv-row vv-' + (r.verdict || 'none').replace(' ', '-'));
+      row.innerHTML = (fr ? '<img alt="">' : '<span></span>') + '<div><b></b><p></p></div><em></em>';
+      if (fr) row.querySelector('img').src = fr.data;
+      row.querySelector('b').textContent = r.t;
+      row.querySelector('p').textContent = r.text;
+      row.querySelector('em').textContent = {seen: 'Seen in the frame', partly: 'Partly: corrected', 'not seen': 'Not seen: corrected'}[r.verdict] || 'Not checked';
+      grid.appendChild(row);
+    });
+    target.appendChild(grid);
+  }
+  if (data.route !== 'ERROR' && data.timeline) {
+    const next = el('div', 'ctas');
+    next.innerHTML = '<button class="btn" type="button">Check an FIR or a statement against this video</button>';
+    next.firstChild.addEventListener('click', () => {
+      const name = 'Video timeline: ' + VV.name;
+      VF_PAPERS = VF_PAPERS.filter(d => d.name !== name).concat({name, text: data.timeline});
+      verifyPapers(); verifyTab('facts'); $('vf-draft').focus();
+      $('vf-draft').scrollIntoView({behavior: 'smooth', block: 'center'});
+    });
+    target.appendChild(next);
+  }
+  target.scrollIntoView({behavior: 'smooth', block: 'start'});
+});
 // The More menu in the top bar.
 $('navmore').querySelector('button').addEventListener('click', e => {
   e.stopPropagation();
@@ -4498,6 +4726,219 @@ $('navmore').querySelector('button').addEventListener('click', e => {
   e.currentTarget.setAttribute('aria-expanded', String(!menu.hidden));
 });
 document.addEventListener('click', e => { if (!e.target.closest('#navmore')) $('navmore').querySelector('.navmenu').hidden = true; });
+
+// ===========================================================================
+// ANSWER VIDEOS: any answer, or the rights card, as a 30-second phone video with captions and a voice, made in the
+// browser. The script is the answer's own words: its question, its key points, the law behind it, free helplines.
+// ===========================================================================
+const VID_W = 720, VID_H = 1280;
+const VID_TEXT = {
+  en: {q: 'Your question', law: 'The law behind it', help: 'Free legal help', of: 'of',
+       lawSay: 'The law behind this: ', helpSay: 'For free legal help, call 1818, the Supreme Court’s legal call centre, or 0800 70806, the Legal Aid Society.',
+       end: 'Every answer traced to its paragraph.', note: 'General information, not legal advice.',
+       brief: 'Case brief', ground: 'Ground', auth: 'Authorities', authSay: 'Authorities relied on: ',
+       endL: 'Prepared with Wakeel AI', noteL: 'Check every authority in its paragraph before you rely on it.'},
+  ur: {q: 'آپ کا سوال', law: 'قانون', help: 'مفت قانونی مدد', of: '/',
+       lawSay: 'اس کے پیچھے قانون: ', helpSay: 'مفت قانونی مدد کے لیے سپریم کورٹ کی ہیلپ لائن اٹھارہ اٹھارہ پر کال کریں۔',
+       end: 'ہر جواب فیصلوں سے ثابت۔', note: 'عمومی معلومات، قانونی مشورہ نہیں۔',
+       brief: '\u06a9\u06cc\u0633 \u0628\u0631\u06cc\u0641', ground: '\u0646\u06a9\u062a\u06c1', auth: '\u062d\u0648\u0627\u0644\u06d2', authSay: '\u062c\u0646 \u062d\u0648\u0627\u0644\u0648\u06ba \u067e\u0631 \u0627\u0646\u062d\u0635\u0627\u0631 \u06c1\u06d2: ',
+       endL: '\u0648\u06a9\u06cc\u0644 \u0627\u06d2 \u0622\u0626\u06cc \u06a9\u06d2 \u0633\u0627\u062a\u06be \u062a\u06cc\u0627\u0631 \u06a9\u0631\u062f\u06c1', noteL: '\u06c1\u0631 \u062d\u0648\u0627\u0644\u06c1 \u0627\u0633 \u06a9\u06d2 \u067e\u06cc\u0631\u0627\u06af\u0631\u0627\u0641 \u0645\u06cc\u06ba \u062f\u06cc\u06a9\u06be \u06a9\u0631 \u0627\u0633\u062a\u0639\u0645\u0627\u0644 \u06a9\u0631\u06cc\u06ba\u06d4'},
+};
+// The key points of an answer: its list items first, else its first sentences; disclaimers and table rows left out.
+function videoPoints(answer, max) {
+  const clean = l => plainWords(l).replace(/^\s*(?:[-*•]|\d+[.)])\s+/, '').replace(/^[^:]{2,40}:\s+(?=\S)/, m => m).replace(/\s+/g, ' ').trim();
+  const skip = l => !l || l.length < 18 || /not legal advice|general information|قانونی مشورہ نہیں|legal aid committee/i.test(l);
+  const cut = l => { if (l.length <= 150) return l; const t = l.slice(0, 150); const k = Math.max(t.lastIndexOf('. '), t.lastIndexOf('۔ ')); return k > 60 ? t.slice(0, k + 1) : t.replace(/\s+\S*$/, '') + '…'; };
+  const lines = String(answer || '').split('\n').filter(l => !/^\s*\|/.test(l) && !/^\s*#/.test(l));
+  let pts = lines.filter(l => /^\s*(?:[-*•]|\d+[.)])\s+/.test(l)).map(clean).filter(l => !skip(l));
+  if (pts.length < 2) pts = (plainWords(lines.join(' ')).match(/[^.!?۔؟]+[.!?۔؟]/g) || []).map(x => x.trim()).filter(l => !skip(l));
+  return pts.slice(0, max || 4).map(cut);
+}
+// style: 'people' explains it simply and ends with the free helplines; 'lawyer' is a brief to pitch the case to a
+// client or a senior: the grounds, the authorities (the judgments it cites and the sections), and a reminder to verify.
+function videoScript(data, title, style) {
+  style = style || (segValue('mode') === 'lawyer' ? 'lawyer' : 'people');
+  const lang = data.language === 'ur' ? 'ur' : 'en';
+  const points = videoPoints(data.answer, 3);
+  const laws = [...new Set([...linkStatutes(escapeHtml(data.answer || '')).matchAll(/data-stat="([^"]+)"/g)].map(m => m[1]))]
+    .filter(k => STATUTES[k]).slice(0, 3).map(k => statuteLabel(k, STATUTES[k]));
+  const cited = citedNumbers(data.answer || '');
+  const cases = [...new Set((data.sources || []).filter(x => cited.has(x.n)).map(x => {
+    const pt = x.parties || {};
+    return pt.appellant && pt.respondent ? (pt.appellant + ' v. ' + pt.respondent).replace(/[()]/g, '') : x.title || [x.judgment_type, x.case_no].filter(Boolean).join(' ');
+  }).filter(Boolean))].slice(0, 3);
+  const script = videoSlides(lang, title || data.restated_query || '', points, laws, style, cases);
+  script.data = data; script.sourceTitle = title;
+  return script;
+}
+function videoSlides(lang, title, points, laws, style, cases) {
+  const T = VID_TEXT[lang], slides = [], L = style === 'lawyer';
+  if (title) slides.push({kind: 'title', head: L ? T.brief : T.q, text: title, say: title});
+  points.forEach((t, i) => slides.push({kind: 'point', head: (L ? T.ground + ' ' : '') + pad2(i + 1) + ' ' + T.of + ' ' + pad2(points.length), n: i + 1, text: t, say: t}));
+  const auth = L ? (cases || []).concat(laws) : laws;
+  if (auth.length) slides.push({kind: 'law', head: L ? T.auth : T.law, text: auth.slice(0, 5).join('\n'), say: (L ? T.authSay : T.lawSay) + auth.slice(0, 5).join(', ')});
+  if (!L) slides.push({kind: 'help', head: T.help, text: '', say: T.helpSay});
+  slides.push({kind: 'end', head: '', text: L ? T.endL : T.end, sub: L ? T.noteL : T.note, say: ''});
+  return {lang, title, slides, style: L ? 'lawyer' : 'people'};
+}
+function rightsVideoScript(lang) {
+  const L = lang === 'ur', items = RIGHTS.filter(r => STATUTES[r.k]).slice(0, 3);
+  return videoSlides(L ? 'ur' : 'en', L ? 'گرفتاری کے وقت آپ کے حقوق' : 'Your rights if you are arrested',
+                     items.map(r => L ? r.ur : r.en), [...new Set(items.map(r => statuteLabel(r.k, STATUTES[r.k])))].slice(0, 3), 'people', []);
+}
+function vidWrap(ctx, text, max) {
+  const out = [];
+  String(text).split('\n').forEach(par => {
+    let line = '';
+    par.split(/\s+/).forEach(w => { const t = line ? line + ' ' + w : w; if (ctx.measureText(t).width > max && line) { out.push(line); line = w; } else line = t; });
+    if (line) out.push(line);
+  });
+  return out;
+}
+function vidDraw(ctx, script, i, local, dur, wave) {
+  const sl = script.slides[i], rtl = script.lang === 'ur', urFont = '"Segoe UI", "Noto Naskh Arabic", Tahoma, sans-serif';
+  const disp = (w, px) => w + ' ' + px + 'px Bahnschrift, "DIN Condensed", "Arial Narrow", sans-serif';
+  const body = (w, px) => w + ' ' + px + 'px ' + (rtl ? urFont : '"Segoe UI", system-ui, sans-serif');
+  const k = Math.min(1, local / 0.55), ease = 1 - Math.pow(1 - k, 3);
+  ctx.fillStyle = '#0a0a0a'; ctx.fillRect(0, 0, VID_W, VID_H);
+  ctx.fillStyle = '#d8cdb9'; ctx.fillRect(0, 0, VID_W, 10);
+  ctx.textBaseline = 'alphabetic'; ctx.direction = 'ltr'; ctx.textAlign = 'left';
+  ctx.font = disp('700', 34); ctx.fillStyle = '#d8cdb9'; ctx.fillText('WAKEEL AI', 56, 96);
+  ctx.textAlign = 'right'; ctx.font = body('400', 22); ctx.fillStyle = '#9a9a96'; ctx.fillText((i + 1) + ' / ' + script.slides.length, VID_W - 56, 94);
+  ctx.globalAlpha = ease;
+  const dy = (1 - ease) * 40, x0 = 56, xr = VID_W - 56, w = VID_W - 112;
+  const put = (t, y) => { ctx.textAlign = rtl ? 'right' : 'left'; ctx.direction = rtl ? 'rtl' : 'ltr'; ctx.fillText(t, rtl ? xr : x0, y); };
+  if (sl.kind === 'title' || sl.kind === 'point') {
+    ctx.font = sl.kind === 'title' ? body('600', 28) : disp('700', 150); ctx.fillStyle = '#d8cdb9';
+    if (sl.kind === 'title') put(sl.head, 300 + dy); else { ctx.direction = 'ltr'; ctx.textAlign = 'left'; ctx.fillText(pad2(sl.n), x0, 400 + dy); }
+    ctx.font = body(sl.kind === 'title' ? '700' : '600', rtl ? 50 : 52); ctx.fillStyle = '#ffffff';
+    const lines = vidWrap(ctx, sl.text, w), lh = rtl ? 86 : 70, y0 = sl.kind === 'title' ? 400 : 520;
+    lines.slice(0, 9).forEach((l, j) => put(l, y0 + j * lh + dy));
+  } else if (sl.kind === 'law') {
+    ctx.font = '600 40px "Segoe UI", system-ui, sans-serif';
+    const items = sl.text.split('\n').map(l => vidWrap(ctx, l, w - 72).slice(0, 2));
+    const boxH = Math.min(700, 230 + items.reduce((a, ls) => a + ls.length * 50 + 26, 0));
+    ctx.fillStyle = '#e4d9c6'; ctx.fillRect(x0, 330 + dy, w, boxH);
+    ctx.fillStyle = '#0a0a0a'; ctx.font = disp('700', 150); ctx.direction = 'ltr'; ctx.textAlign = 'left'; ctx.fillText('§', x0 + 36, 490 + dy);
+    ctx.font = '600 40px "Segoe UI", system-ui, sans-serif';
+    let y = 580;
+    items.forEach(ls => { ls.forEach(m => { if (y < 330 + boxH - 20) ctx.fillText(m, x0 + 36, y + dy); y += 50; }); y += 26; });
+    ctx.fillStyle = '#d8cdb9'; ctx.font = body('600', 28); put(sl.head, 300 + dy);
+  } else if (sl.kind === 'help') {
+    ctx.fillStyle = '#d8cdb9'; ctx.font = body('600', 30); put(sl.head, 300 + dy);
+    HELPLINES.slice(0, 3).forEach((h, j) => {
+      const y = 430 + j * 190 + dy;
+      ctx.direction = 'ltr'; ctx.textAlign = 'left'; ctx.font = disp('700', 96); ctx.fillStyle = '#ffffff'; ctx.fillText(h[0], x0, y);
+      ctx.font = '500 30px "Segoe UI", system-ui, sans-serif'; ctx.fillStyle = '#d8cdb9'; ctx.fillText(h[2], x0, y + 48);
+    });
+  } else {
+    ctx.direction = 'ltr'; ctx.textAlign = 'center'; ctx.fillStyle = '#ffffff'; ctx.font = disp('700', 120); ctx.fillText('WAKEEL AI', VID_W / 2, 600 + dy);
+    ctx.font = body('500', 34); ctx.fillStyle = '#d8cdb9'; ctx.direction = rtl ? 'rtl' : 'ltr'; ctx.fillText(sl.text, VID_W / 2, 690 + dy);
+    ctx.font = body('400', 24); ctx.fillStyle = '#9a9a96'; ctx.fillText(sl.sub || '', VID_W / 2, 750 + dy);
+  }
+  ctx.globalAlpha = 1;
+  // the voice, drawn as it speaks
+  const n = 42, bw = w / n;
+  ctx.fillStyle = '#d8cdb9';
+  for (let b = 0; b < n; b++) {
+    const v = wave ? wave[Math.floor(b * wave.length / n / 2)] / 255 : 0;
+    const h = 6 + v * 90;
+    ctx.fillRect(x0 + b * bw + 2, 1110 - h / 2, bw - 5, h);
+  }
+  ctx.fillStyle = '#2b2b2b'; ctx.fillRect(x0, 1190, w, 6);
+  ctx.fillStyle = '#d8cdb9'; ctx.fillRect(x0, 1190, w * Math.min(1, local / dur), 6);
+}
+const VID = {busy: false, stop: null};
+function vidStep(text, state) {
+  const li = el('li', state || ''); li.textContent = text; $('vid-steps').appendChild(li); return li;
+}
+async function makeVideo(script) {
+  if (VID.busy || !script || script.slides.length < 3) return;
+  VID.busy = true;
+  const box = $('vid'), canvas = $('vid-canvas'), video = $('vid-video'), ctx = canvas.getContext('2d');
+  box.hidden = false; document.body.classList.add('voice-on');
+  canvas.hidden = false; video.hidden = true; video.removeAttribute('src');
+  $('vid-steps').innerHTML = ''; $('vid-acts').hidden = true;
+  $('vid-title').textContent = (script.style === 'lawyer' ? 'Video brief: ' : '') + (script.title || 'Your answer, as a video');
+  vidStep('Script taken from the answer: ' + plural(script.slides.length, 'slide'), 'done');
+  vidDraw(ctx, script, 0, 0, 1, null);
+  const voiceStep = vidStep('Recording the voice…', 'on');
+  const ac = new (window.AudioContext || window.webkitAudioContext)();
+  try { await ac.resume(); } catch (e) {}
+  const clips = await Promise.all(script.slides.map(async sl => {
+    if (!sl.say) return null;
+    try {
+      const r = await fetch('/api/speak', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                           body: JSON.stringify({text: sl.say, language: script.lang, tone: script.style === 'lawyer' ? 'formal' : 'plain'})});
+      if (!r.ok) return null;
+      return await ac.decodeAudioData(await r.arrayBuffer());
+    } catch (e) { return null; }
+  }));
+  const voiced = clips.filter(Boolean).length;
+  voiceStep.className = 'done';
+  voiceStep.textContent = voiced ? 'Voice ready: ' + plural(voiced, 'clip') + ' in ' + (script.lang === 'ur' ? 'Urdu' : 'English') : 'No voice available: captions only';
+  const words = t => (String(t).match(/\S+/g) || []).length;
+  const durs = script.slides.map((sl, i) => clips[i] ? clips[i].duration + 0.7 : sl.kind === 'end' ? 2.8 : Math.max(2.8, words(sl.text) / 2.6 + 1));
+  const starts = durs.reduce((a, d, i) => (a.push(i ? a[i - 1] + durs[i - 1] : 0), a), []), total = starts[starts.length - 1] + durs[durs.length - 1];
+  const filmStep = vidStep('Filming…', 'on');
+  const dest = ac.createMediaStreamDestination(), an = ac.createAnalyser();
+  an.fftSize = 256; an.connect(dest); an.connect(ac.destination);
+  const stream = new MediaStream([...canvas.captureStream(30).getVideoTracks(), ...dest.stream.getAudioTracks()]);
+  const mime = ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm'].find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
+  const rec = new MediaRecorder(stream, mime ? {mimeType: mime, videoBitsPerSecond: 3000000} : {});
+  const chunks = [];
+  rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  const done = new Promise(res => { rec.onstop = res; });
+  rec.start(250);
+  // Audio may be held back until someone presses something; then the film runs on the page's clock, silent.
+  const live = ac.state === 'running', now = () => live ? ac.currentTime : performance.now() / 1000;
+  const t0 = now() + 0.25;
+  clips.forEach((b, i) => { if (!b || !live) return; const src = ac.createBufferSource(); src.buffer = b; src.connect(an); src.start(t0 + starts[i] + 0.35); });
+  const wave = new Uint8Array(an.frequencyBinCount);
+  let stopped = false;
+  VID.stop = () => { stopped = true; };
+  await new Promise(res => {
+    const frame = () => {
+      const t = now() - t0;
+      if (stopped || t > total) { res(); return; }
+      let i = starts.length - 1; while (i > 0 && starts[i] > t) i--;
+      an.getByteFrequencyData(wave);
+      vidDraw(ctx, script, i, Math.max(0, t - starts[i]), durs[i], wave);
+      const sec = Math.max(0, Math.floor(t));
+      filmStep.textContent = 'Filming ' + Math.floor(sec / 60) + ':' + pad2(sec % 60) + ' of ' + Math.floor(total / 60) + ':' + pad2(Math.round(total % 60));
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
+  });
+  rec.stop(); await done; ac.close();
+  VID.busy = false;
+  if (stopped) return;
+  const type = (mime || 'video/webm').split(';')[0], ext = type.includes('mp4') ? 'mp4' : 'webm';
+  const blob = new Blob(chunks, {type}), url = URL.createObjectURL(blob);
+  filmStep.className = 'done'; filmStep.textContent = 'Done: ' + Math.round(total) + ' seconds, ' + (blob.size / 1048576).toFixed(1) + ' MB (' + ext.toUpperCase() + ')';
+  canvas.hidden = true; video.hidden = false; video.src = url;
+  const file = new File([blob], 'wakeel-answer.' + ext, {type});
+  const acts = $('vid-acts');
+  acts.hidden = false;
+  acts.innerHTML = '<a class="btn" download="wakeel-answer.' + ext + '">Download the video</a>' +
+    (navigator.canShare && navigator.canShare({files: [file]}) ? '<button class="btn line" type="button" data-a="share">Share</button>' : '') +
+    '<a class="btn line" target="_blank" rel="noopener">Send the summary on WhatsApp</a>' +
+    (script.data ? '<button class="btn line" type="button" data-a="other">' + (script.style === 'lawyer' ? 'Make the version for a client' : 'Make the brief for a lawyer') + '</button>' : '') +
+    '<button class="btn line" type="button" data-a="again">Make it again</button>';
+  acts.firstChild.href = url;
+  const summary = [script.title].concat(script.slides.filter(s => s.kind === 'point').map(s => '• ' + s.text))
+    .concat(['', 'Free legal help: 1818 (Supreme Court) · 0800-70806 (Legal Aid Society)', 'Wakeel AI']).join('\n');
+  acts.querySelector('a[target]').href = 'https://wa.me/?text=' + encodeURIComponent(summary);
+  const sh = acts.querySelector('[data-a="share"]');
+  if (sh) sh.addEventListener('click', () => navigator.share({files: [file], title: 'Wakeel AI', text: script.title}).catch(() => {}));
+  acts.querySelector('[data-a="again"]').addEventListener('click', () => makeVideo(script));
+  const other = acts.querySelector('[data-a="other"]');
+  if (other) other.addEventListener('click', () => makeVideo(videoScript(script.data, script.sourceTitle, script.style === 'lawyer' ? 'people' : 'lawyer')));
+  video.play().catch(() => {});
+}
+function closeVideo() { if (VID.stop) VID.stop(); $('vid').hidden = true; document.body.classList.remove('voice-on'); const v = $('vid-video'); v.pause(); }
+$('vid-x').addEventListener('click', closeVideo);
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('vid').hidden) closeVideo(); });
 
 // The agent room's map: what each agent touches lights up, with a line saying who touched what.
 function netSay(who, n, what) {
@@ -5911,7 +6352,11 @@ function selectDraft(id) {
   if (!d) return;
   draftKind = id;
   renderPicker($('draft-kinds'), DRAFTS, id, selectDraft);
-  $('draft-form').innerHTML = d.fields.map((f, i) =>
+  $('draft-form').innerHTML = '<div class="fillbar"><button type="button" class="btn line" data-fill="sample">Fill with a sample</button>' +
+    '<button type="button" class="btn line" data-fill="doc">Fill from a document</button><div class="fillbox" hidden>' +
+    '<textarea class="field" rows="5" dir="auto" placeholder="Paste the FIR, notice, order or your own account here"></textarea>' +
+    '<div class="ctas"><label class="btn line vf-add">Or choose a file<input type="file" accept=".pdf,.txt,.md,image/*" hidden></label>' +
+    '<button type="button" class="btn" data-fill="go">Fill the form</button><span class="fillnote"></span></div></div></div>' + d.fields.map((f, i) =>
     '<label class="eyebrow" for="df' + i + '">' + escapeHtml(f[0]) + '</label>' +
     (f[1] ? '<textarea class="field" id="df' + i + '" rows="3" dir="auto"></textarea>' +
             '<div class="microw"><button class="mic" type="button" data-for="df' + i + '" hidden></button></div>'
@@ -5922,6 +6367,70 @@ function selectDraft(id) {
   $('draft-go').textContent = d.endpoint ? 'Run' : 'Draft';
   $('draft-result').innerHTML = ''; $('draft-status').textContent = '';
 }
+// Fill the form: a worked sample (the same facts the demo cache holds, so it drafts at once), or the user's own
+// document read into the fields, leaving blank whatever the document does not say.
+const DRAFT_SAMPLES = {
+  reply_to_notice: ['Tariq Mehmood', 'Muhammad Aslam, through his counsel', '12 March 2024', 'Payment of Rs. 900,000 within 15 days, on a cheque that was dishonoured',
+                    'The cheque was handed over as security for a business loan, not as repayment; part of the loan was repaid in cash'],
+  bail_application: ['Court of Sessions, Lahore', 'Tariq Mehmood', 'FIR No. 214/2024 dated 3 March 2024', 'Police Station Gulberg, Lahore', 'Section 489-F PPC',
+                     'The dispute is a civil one over a loan; the offence is not within the prohibitory clause; the accused has no previous record'],
+  cheque_notice: ['Muhammad Aslam', 'Tariq Mehmood', 'Rs. 900,000', 'Cheque No. 00771245, Bank Alfalah, dated 01.02.2024',
+                  'Loan of Rs. 900,000 given in January 2024, to be repaid by cheque', '15'],
+  fir_application: ['Muhammad Aslam, CNIC 35202-1234567-1', 'Police Station Gulberg, Lahore', '1 March 2024, Bank Alfalah, Gulberg branch',
+                    'Tariq Mehmood gave me cheque No. 00771245 for Rs. 900,000 to repay a loan. It was dishonoured for insufficient funds and he refuses to pay.',
+                    'Tariq Mehmood, Gulberg III, Lahore'],
+  superdari: ['Judicial Magistrate Section 30, Lahore', 'Ali Raza', 'Honda CD-70, 2021, registration LEB-4521', 'Police Station Gulberg, Lahore, 2 October 2026',
+              'Registration book and purchase receipt in my name', 'I am the registered owner; the motorbike is not case property in any offence, and I need it for work'],
+  strategy: ['Complainant', 'Bail was granted on a compromise: the accused promised to pay Rs. 900,000 in three instalments and paid nothing. The cheque case under section 489-F PPC is pending.',
+             'Cancel the bail', 'He says the instalments were never due until the cheque case ends.'],
+  hearing: ['Complainant', 'Application to cancel pre-arrest bail',
+            'Bail was granted on a compromise: the accused promised to pay Rs. 900,000 in three instalments and paid nothing. The cheque case under section 489-F PPC is pending.',
+            'He says the instalments were never due until the cheque case ends.'],
+  client_letter: ['Tariq Mehmood', 'State v. Tariq Mehmood, FIR 214/2024, Section 489-F PPC', 'Bail arguments were heard; the court asked for the bank record of the loan and adjourned the matter',
+                  '18 November 2026; bring the bank statements and the loan agreement'],
+  opponent: [null, 'Accused (petitioner)', ''],
+};
+$('draft-form').addEventListener('click', async e => {
+  const b = e.target.closest('[data-fill]');
+  if (!b) return;
+  const d = DRAFTS.find(x => x.id === draftKind), box = $('draft-form').querySelector('.fillbox');
+  if (!d) return;
+  if (b.dataset.fill === 'sample') {
+    const vals = DRAFT_SAMPLES[d.id] || [];
+    d.fields.forEach((f, i) => { const v = d.id === 'opponent' && i === 0 ? SAMPLE_PETITION : d.id === 'chronology' && i === 0 ? TOUR_FIR : vals[i]; if ($('df' + i) && v != null) $('df' + i).value = v; });
+    box.hidden = true;
+    return;
+  }
+  if (b.dataset.fill === 'doc') { box.hidden = !box.hidden; if (!box.hidden) box.querySelector('textarea').focus(); return; }
+  const text = box.querySelector('textarea').value.trim(), note = box.querySelector('.fillnote');
+  if (!text) { box.querySelector('textarea').focus(); return; }
+  b.disabled = true; note.textContent = 'Reading the document…';
+  let r;
+  try { r = await (await fetch('/api/fill', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                              body: JSON.stringify({labels: d.fields.map(f => f[0]), text})})).json(); }
+  catch (err) { r = {route: 'ERROR', answer: err.message}; }
+  b.disabled = false;
+  if (r.route === 'ERROR') { note.textContent = r.answer || 'Could not read it.'; return; }
+  let n = 0;
+  d.fields.forEach((f, i) => { const v = (r.values || {})[f[0]]; if (v && $('df' + i)) { $('df' + i).value = v; n++; } });
+  note.textContent = 'Filled ' + n + ' of ' + d.fields.length + ' fields from the document. The rest it does not say: fill them in.';
+});
+$('draft-form').addEventListener('change', async e => {
+  const inp = e.target.closest('.fillbox input[type="file"]');
+  if (!inp || !inp.files[0]) return;
+  const f = inp.files[0], box = inp.closest('.fillbox'), note = box.querySelector('.fillnote');
+  note.textContent = 'Reading ' + f.name + '…';
+  const isText = /\.(txt|md)$/i.test(f.name) || f.type.startsWith('text/');
+  const body = isText ? {filename: f.name, text: await f.text()}
+    : {filename: f.name, mime: f.type || '', data: await new Promise(res => { const rd = new FileReader(); rd.onload = () => res(String(rd.result).split(',')[1] || ''); rd.readAsDataURL(f); })};
+  let d;
+  try { d = await (await fetch('/api/extract', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})).json(); }
+  catch (err) { d = {route: 'ERROR', answer: err.message}; }
+  inp.value = '';
+  if (d.route === 'ERROR') { note.textContent = d.answer; return; }
+  box.querySelector('textarea').value = d.text;
+  note.textContent = f.name + ' read. Press Fill the form.';
+});
 // The chronology workflow over one library judgment, opened from its panel.
 async function timelineOf(docId, title) {
   go('/draft');
@@ -6791,7 +7300,7 @@ class ActivityLog:
                 "/api/compare": "Compare", "/api/table": "Review table", "/api/table/ask": "Review table",
                 "/api/explain": "Explain", "/api/explain/ask": "Explain", "/api/draft": "Draft",
                 "/api/strategy": "Workflows", "/api/workflow": "Workflows", "/api/judgment/ask": "Ask a judgment", "/api/case/stream": "Agent room",
-                "/api/citator": "Citator", "/api/moot": "Moot court"}
+                "/api/citator": "Citator", "/api/moot": "Moot court", "/api/video": "Video evidence"}
 
     def __init__(self, path):
         self.path = Path(path)
@@ -6846,7 +7355,7 @@ SIMULATED_TASK_SECONDS = {"summarize": (6.0, 10.0), "compare": (8.0, 13.0), "tab
                           "strategy": (8.0, 13.0)}
 
 
-def make_handler(agent, index_fn, stats_fn=corpus_stats, cache=None, replay_delay=0.35, activity=None,
+def make_handler(agent, index_fn, stats_fn=corpus_stats, cache=None, replay_delay=0.35, activity=None, speak_fn=None,
                  simulate=False):
     """Build the request handler. agent/index_fn/stats_fn are injected so tests can stub them.
 
@@ -6858,6 +7367,23 @@ def make_handler(agent, index_fn, stats_fn=corpus_stats, cache=None, replay_dela
 
     lock = threading.Lock()
     seen_threads = set()
+    speak = speak_fn or W.synthesize_speech
+    spoken = {}   # voice clips already made: in the demo cache's folder when there is one, else in memory
+
+    def speech(text: str, language: str, tone: str = "plain") -> bytes:
+        key = hashlib.sha256(f"{W.SPEECH_MODEL}|{W.SPEECH_VOICE}|{language}|{tone}|{text}".encode("utf-8")).hexdigest()[:32]
+        path = cache.folder / "speech" / f"{key}.mp3" if cache else None
+        if key in spoken:
+            return spoken[key]
+        if path and path.exists():
+            return path.read_bytes()
+        audio = speak(text, language) if tone == "plain" else speak(text, language, tone)
+        if path:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(audio)
+        elif len(spoken) < 300:
+            spoken[key] = audio
+        return audio
 
     def first_turn(thread_id: str) -> bool:
         with lock:
@@ -7198,6 +7724,41 @@ def make_handler(agent, index_fn, stats_fn=corpus_stats, cache=None, replay_dela
                 self._log(200, {"route": "ERROR" if any(e.get("status") == "failed" for e in recorded) else "CASE"})
                 return
 
+            if self.path == "/api/fill":
+                labels = data.get("labels") if isinstance(data.get("labels"), list) else []
+                text = str(data.get("text") or "")
+                if not labels or not text.strip():
+                    self._json(400, {"answer": "Give a document and a form to fill.", "route": "ERROR", "values": {}})
+                    return
+                self._json(200, cached_task("fill", {"labels": labels, "text": hashlib.sha256(text.encode("utf-8")).hexdigest()},
+                                            lambda: guarded(lambda: agent.fill_fields(labels, text))))
+                return
+
+            if self.path == "/api/video":
+                frames = [f for f in (data.get("frames") or []) if isinstance(f, dict)][:W.WakeelAgent.VIDEO_MAX_FRAMES]
+                frames = [f for f in frames if isinstance(f.get("data"), str) and len(f["data"]) < 600000]
+                if not frames:
+                    self._json(400, {"answer": "Choose a video first.", "route": "ERROR", "sources": []})
+                    return
+                context = str(data.get("context") or "").strip()[:2000]
+                digest = hashlib.sha256("".join(f["data"] for f in frames).encode("utf-8")).hexdigest()
+                self._json(200, cached_task("video", {"frames": digest, "context": context, "mode": mode, "language": language},
+                                            lambda: guarded(lambda: agent.video_evidence(frames, context, mode=mode, language=language))))
+                return
+
+            if self.path == "/api/speak":
+                text = str(data.get("text") or "").strip()[:W.SPEECH_MAX_CHARS]
+                if not text:
+                    self._json(400, {"answer": "Nothing to read aloud.", "route": "ERROR"})
+                    return
+                try:
+                    audio = speech(text, language, "formal" if data.get("tone") == "formal" else "plain")
+                except Exception as e:
+                    self._json(503, {"answer": f"The voice could not be made: {W._api_error_message(e)}", "route": "ERROR"})
+                    return
+                self._send(200, audio, "audio/mpeg")
+                return
+
             if self.path == "/api/moot":
                 facts = str(data.get("facts") or "").strip()
                 if not facts:
@@ -7205,10 +7766,12 @@ def make_handler(agent, index_fn, stats_fn=corpus_stats, cache=None, replay_dela
                     return
                 history = data.get("history") if isinstance(data.get("history"), list) else []
                 args = (facts, str(data.get("side") or ""), str(data.get("hearing") or ""), history, bool(data.get("finish")))
+                suggest = bool(data.get("suggest"))
                 # Keyed on the whole hearing so far: a rehearsed hearing (the demo's) replays, and a new answer is a new turn.
                 self._json(200, cached_task("moot", {"facts": facts, "side": args[1], "hearing": args[2], "history": history,
-                                                     "finish": args[4], "mode": mode, "language": language},
-                                            lambda: guarded(lambda: agent.moot_turn(*args, mode=mode, language=language))))
+                                                     "finish": args[4], "mode": mode, "language": language,
+                                                     **({"suggest": True} if suggest else {})},
+                                            lambda: guarded(lambda: agent.moot_turn(*args, mode=mode, language=language, suggest=suggest))))
                 return
 
             if self.path == "/api/citator":

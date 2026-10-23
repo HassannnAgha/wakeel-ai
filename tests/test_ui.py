@@ -898,3 +898,27 @@ def test_inheritance_fields_take_only_whole_numbers_within_their_limit():
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "countfield_test.js")
     run = subprocess.run([node, script], capture_output=True, text=True, timeout=60)
     assert run.returncode == 0, run.stdout + run.stderr
+
+def test_speak_returns_audio_and_makes_each_clip_once():
+    import tempfile
+    calls = []
+    def fake_speak(text, language, tone="plain"):
+        calls.append((text, language))
+        return b"ID3" + text.encode("utf-8")
+    cache = ui.AnswerCache(tempfile.mkdtemp())
+    handler = ui.make_handler(StubAgent(), lambda: "ok", stats_fn=lambda: {}, cache=cache, replay_delay=0, speak_fn=fake_speak)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        for _ in range(2):
+            req = urllib.request.Request(base + "/api/speak", data=json.dumps({"text": "Call 1818", "language": "en"}).encode(),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=10) as r:
+                assert r.headers["Content-Type"] == "audio/mpeg" and r.read() == b"ID3Call 1818"
+        assert calls == [("Call 1818", "en")]                      # the second time comes from the saved clip
+        assert list((cache.folder / "speech").glob("*.mp3"))
+        status, data = post(base, "/api/speak", {"text": "  "})
+        assert status == 400
+    finally:
+        server.shutdown()

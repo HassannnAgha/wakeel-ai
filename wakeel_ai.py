@@ -42,6 +42,29 @@ if LLM_PROVIDER not in PROVIDERS:
 API_KEY_ENV = PROVIDERS[LLM_PROVIDER]["key_env"]
 
 
+# The voice for answer videos: OpenAI's speech model, whatever model writes the answers (it needs OPENAI_API_KEY).
+SPEECH_MODEL = os.getenv("WAKEEL_TTS_MODEL", "gpt-4o-mini-tts")
+SPEECH_VOICE = os.getenv("WAKEEL_TTS_VOICE", "nova")
+SPEECH_MAX_CHARS = 700
+
+
+def synthesize_speech(text: str, language: str = "en", tone: str = "plain") -> bytes:
+    """MP3 of the text read aloud in the answer's language: calm and simple for a citizen ("plain"), or a confident
+    advocate's briefing for a lawyer ("formal")."""
+    from openai import OpenAI
+    text = (text or "").strip()[:SPEECH_MAX_CHARS]
+    if not text:
+        raise ValueError("Nothing to read aloud.")
+    how = {"ur": "Speak in clear, calm Urdu at a steady pace, like a kind legal adviser explaining to a citizen.",
+           "roman_ur": "The text is Urdu written in Latin letters. Speak it as clear, calm Urdu at a steady pace."
+           }.get(language, "Speak in clear, calm English with a Pakistani accent, at a steady pace, like a kind legal adviser.")
+    if tone == "formal":
+        how += " Use the measured, confident tone of an advocate briefing a client or a senior colleague."
+    reply = OpenAI(timeout=40).audio.speech.create(model=SPEECH_MODEL, voice=SPEECH_VOICE, response_format="mp3",
+                                                   input=text, instructions=how)
+    return reply.read() if hasattr(reply, "read") else reply.content
+
+
 def require_api_key() -> None:
     """Called before the LLM is constructed. Indexing and chunking do not need a key."""
     if not os.getenv(API_KEY_ENV):
@@ -2197,6 +2220,11 @@ or say what it fails to meet). Then ask ONE new question, in one to three senten
 covered. You may put an excerpt to counsel, cited as [S<n>]. Do not decide the case. Write only what the judge says,
 with no heading and no label."""
 
+MOOT_SUGGEST = """Now write what counsel should say in reply to the judge's last question: two to four sentences, starting
+"My lord,", respectful and persuasive, built from the facts and the excerpts. Where an excerpt helps, name the
+judgment by its parties; do not use [S] markers. Concede what must be conceded and answer the question asked.
+Write only counsel's words, with no heading and no label."""
+
 MOOT_FEEDBACK = """The hearing is over. Give counsel feedback, as a senior judge would after a moot.
 
 Output Format (Markdown), with these headings in order:
@@ -2205,6 +2233,85 @@ Output Format (Markdown), with these headings in order:
 - "## The strongest point" and "## The weakest point": one or two sentences each.
 - "## Read before the real hearing": the excerpts counsel should know, each cited as [S<n>] with what it holds.
 Base every remark on the transcript and the excerpts; do not invent cases."""
+
+VIDEO_READ_PROMPT = """These are {n} still frames from a phone video, in time order. Each is labelled with the time it was taken.
+Describe only what can be seen.
+
+Rules:
+- One row per frame: the time, then what is visible: people (by appearance and clothing or uniform, never by name),
+  vehicles, actions, objects, places, and any readable text such as number plates, signs or shop names.
+- Do not guess who anyone is, what they intend, or anything that is not in the frame. Where a frame is unclear,
+  say "unclear".
+- Note what changes from one frame to the next.
+
+Output (Markdown): a table with the columns | Time | What can be seen |, then one line starting "Overall:" that
+sums up the sequence in two sentences.
+{context}"""
+
+VIDEO_CHECK_PROMPT = """You are checking a description of a video against the video itself. Below are numbered
+statements, each about one frame, then the frames in the same order, each labelled with its time.
+
+For each statement look ONLY at its own frame and decide:
+- "seen": the frame clearly shows everything the statement says
+- "partly": the frame shows some of it, but not all
+- "not seen": the frame does not show it
+For "partly" and "not seen", write a correction that says only what that frame does show.
+
+Reply with JSON only: a list of objects {{"n": <statement number>, "verdict": "seen" | "partly" | "not seen",
+"correction": "<what the frame shows, or empty>"}}.
+
+Statements:
+{rows}"""
+
+VIDEO_LAW_PROMPT = PromptTemplate.from_template(
+    """
+A person has a phone video they want to use as evidence. Below is a timeline of what its frames show (written from
+the frames alone), what they said about it, and judgment excerpts.
+
+Rules:
+- Rely on the timeline for what the video shows. Do not add events it does not record.
+- Cite each excerpt you rely on as [S<n>], one source per bracket. Do not invent cases, sections or holdings.
+- Be careful and plain: a video can support a fact; it rarely proves everything on its own.
+
+Output Format (Markdown), with these headings in order:
+- "## Does the video match what you said?": if the person said nothing, write "Verdict: Nothing to compare." Otherwise
+  the first line is exactly one of "Verdict: Matches", "Verdict: Partly matches", "Verdict: Does not show it" or
+  "Verdict: Contradicts it", followed by one sentence on why, naming the times. Judge only by the timeline: a claim
+  the timeline does not record (an assault, a weapon, a death, a bribe) is "Does not show it", however serious it is.
+- "## What it may help prove": the facts the timeline supports, each tied to its time in the video.
+- "## What it does not show": gaps a court or the other side will point to (no sound, moments not filmed, people not
+  identifiable, no date on screen), from the timeline.
+- "## Keep it safe as evidence": practical steps: keep the original file and the phone, do not edit, trim or
+  re-send it through apps that compress it, note when, where and by whom it was recorded, make copies, give it to
+  the lawyer or the court, not only to the police.
+- "## What the judgments say": what the excerpts say about the matter the video concerns, cited, or say they do not
+  address it.
+
+Audience and language:
+{style}
+
+The timeline from the video:
+{timeline}
+
+What the person says about it:
+{context}
+
+Judgment excerpts:
+{context_passages}
+"""
+)
+
+FILL_PROMPT = """Fill in a form from the document below. For each field, copy what the document says about it, briefly,
+in the document's own words where you can. If the document does not say, leave the field as an empty string: never
+guess, never invent a name, date, number or place.
+
+Reply with JSON only: an object whose keys are exactly these field names, and whose values are strings.
+Fields:
+{fields}
+
+Document:
+{document}
+"""
 
 CITATOR_PROMPT = """You are a legal citator. Each excerpt below comes from a Pakistani judgment that cites {citation}.
 For each excerpt, decide how that judgment treats {citation}:
@@ -3021,10 +3128,123 @@ Output Instructions:
         return {"answer": head + "\n" + "\n".join(lines), "route": "TABLE", "restated_query": "",
                 "columns": columns, "rows": rows, "sources": sources, "grounded": True}
 
+    VIDEO_MAX_FRAMES = 10
+
+    def video_evidence(self, frames: List[Dict], context: str = "", mode: str = DEFAULT_MODE,
+                       language: str = DEFAULT_LANGUAGE) -> Dict:
+        """A phone video as evidence: a timeline of what its frames show (read by the model from the frames the browser
+        took), then what it may prove, its gaps, how to keep it, and what the judgments say. The video never leaves
+        the user's device; only the still frames are sent, and they are not kept."""
+        failed = {"route": "ERROR", "restated_query": "", "sources": [], "grounded": False}
+        frames = [f for f in (frames or []) if isinstance(f, dict) and str(f.get("data", "")).startswith("data:image/")][:self.VIDEO_MAX_FRAMES]
+        if not frames:
+            return {**failed, "answer": "No frames could be read from the video."}
+        context = (context or "").strip()[:2000]
+        stamp = lambda f: f"{int(float(f.get('t', 0)) // 60)}:{int(float(f.get('t', 0)) % 60):02d}"
+        # The reader looks blind: it never sees what the person claims, so the claim cannot colour what it "sees".
+        content = [{"type": "text", "text": VIDEO_READ_PROMPT.format(n=len(frames), context="")}]
+        for f in frames:
+            content.append({"type": "text", "text": f"Frame at {stamp(f)}"})
+            # Low detail: each frame costs a small, fixed number of tokens; scenes and actions still read well.
+            content.append({"type": "image_url", "image_url": {"url": f["data"], "detail": "low"}})
+        try:
+            with agent_label("video", "Video reader"):
+                timeline = message_text(self._invoke([HumanMessage(content=content)]))
+        except Exception as e:
+            return {**failed, "answer": _api_error_message(e)}
+        timeline, rows = self._check_video(timeline, frames, stamp)
+        overall = next((l.split(":", 1)[1] for l in timeline.splitlines() if l.strip().lower().startswith("overall:")), "")
+        try:
+            # The person's own words name the legal issue (a seizure, an arrest); the video says what happened.
+            hits = add_context_chunks(search_hybrid((context[:400] + " " + (overall or timeline)[:300]).strip(), top_k=6))
+        except Exception:
+            hits = []
+        try:
+            with agent_label("write", "Evidence agent"):
+                analysis = message_text(self._invoke(VIDEO_LAW_PROMPT.format(
+                    timeline=timeline, context=context or "(nothing)", style=style_instructions(mode, language),
+                    context_passages=format_search_results(hits) if hits else "(no judgments found)")))
+        except Exception as e:
+            return {**failed, "answer": _api_error_message(e)}
+        # The verdict on the person's claim: the first line the evidence agent writes, read here so the page can show it.
+        m = re.search(r"Verdict:\s*(Matches|Partly matches|Does not show it|Contradicts it)\b\.?\s*(.*)", analysis, re.I)
+        match = {"verdict": m.group(1).capitalize() if m else "", "reason": m.group(2).strip()[:400] if m else ""} if context else None
+        return {"answer": "## What the video shows\n\n" + timeline.strip() + "\n\n" + analysis.strip(), "route": "VIDEO",
+                "restated_query": overall.strip() or "Video evidence", "sources": source_records(hits), "grounded": bool(hits),
+                "timeline": timeline.strip(), "frames": [{"t": float(f.get("t", 0))} for f in frames], "rows": rows,
+                "match": match}
+
+    VIDEO_VERDICTS = {"seen": "Yes", "partly": "Partly", "not seen": "Not seen"}
+
+    def _check_video(self, timeline: str, frames: List[Dict], stamp):
+        """A second look: each row of the timeline is taken back to its own frame and marked seen, partly or not
+        seen; anything the frame does not show is replaced by what it does. Returns the checked timeline and the
+        rows, [{t, text, verdict}]. If the timeline has no rows, or the check fails, it is returned as it was."""
+        found = re.findall(r"^\|\s*(\d{1,2}:\d{2})\s*\|\s*(.+?)\s*\|\s*$", timeline, re.M)
+        if not found:
+            return timeline, []
+        content = [{"type": "text", "text": VIDEO_CHECK_PROMPT.format(rows="\n".join(f"{i}. [{t}] {d}" for i, (t, d) in enumerate(found, 1)))}]
+        for f in frames:
+            content.append({"type": "text", "text": f"Frame at {stamp(f)}"})
+            content.append({"type": "image_url", "image_url": {"url": f["data"], "detail": "low"}})
+        try:
+            with agent_label("video-check", "Video checker"):
+                raw = message_text(self._invoke([HumanMessage(content=content)]))
+            checks = json.loads(raw[raw.index("["): raw.rindex("]") + 1])
+        except Exception:
+            return timeline, [{"t": t, "text": d, "verdict": ""} for t, d in found]
+        rows = []
+        for i, (t, d) in enumerate(found, 1):
+            c = next((x for x in checks if isinstance(x, dict) and str(x.get("n")) == str(i)), {})
+            verdict = str(c.get("verdict", "")).lower().strip()
+            fix = str(c.get("correction", "")).strip()
+            if verdict == "not seen":
+                d = fix or "Not visible in this frame."
+            elif verdict == "partly" and fix:
+                d = fix
+            rows.append({"t": t, "text": d, "verdict": verdict if verdict in self.VIDEO_VERDICTS else ""})
+        overall = next((l for l in timeline.splitlines() if l.strip().lower().startswith("overall:")), "")
+        table = ["| Time | What can be seen | Checked against its frame |", "|---|---|---|"]
+        table += [f"| {r['t']} | {r['text'].replace('|', '/')} | {self.VIDEO_VERDICTS.get(r['verdict'], 'Not checked')} |" for r in rows]
+        changed = sum(r["verdict"] in ("partly", "not seen") for r in rows)
+        note = (f"The video checker looked at each row again: {len(rows) - changed} confirmed, {changed} corrected to what the "
+                f"frame shows." if rows else "")
+        return "\n".join(table) + ("\n\n" + overall if overall else "") + ("\n\n" + note if note else ""), rows
+
+    def fill_fields(self, labels: List[str], text: str) -> Dict:
+        """A form's fields filled from a document the user gives (an FIR, a notice, a receipt). Fields the document does
+        not answer stay empty; values not found in the document are dropped."""
+        labels = [str(l).strip()[:120] for l in (labels or []) if str(l).strip()][:12]
+        text = (text or "").strip()[:12000]
+        if not labels or not text:
+            return {"route": "ERROR", "answer": "Give a document and a form to fill.", "values": {}}
+        try:
+            with agent_label("fill", "Form filler"):
+                raw = message_text(self._invoke(FILL_PROMPT.format(fields="\n".join(f"- {l}" for l in labels), document=text)))
+            got = json.loads(raw[raw.index("{"): raw.rindex("}") + 1])
+        except Exception as e:
+            return {"route": "ERROR", "answer": _api_error_message(e), "values": {}}
+        flat = re.sub(r"[^a-z0-9]+", "", text.lower())
+        nums = lambda t: set(re.findall(r"\d+", re.sub(r"(?<=\d)[,.](?=\d{3})", "", t)))
+        doc_nums = nums(text)
+        values = {}
+        for l in labels:
+            v = str(got.get(l, "") or "").strip()[:2000]
+            # Keep a value only if it comes from the document: every number in it whole (an amount, a date, an FIR
+            # number), and most of its words. A guess is dropped and the field stays empty.
+            words = re.findall(r"[a-z]{3,}", v.lower())
+            if not v or not nums(v) <= doc_nums:
+                continue
+            if words and sum(w in flat for w in words) / len(words) < 0.5:
+                continue
+            if words or nums(v):
+                values[l] = v
+        return {"route": "FILL", "answer": f"Filled {len(values)} of {len(labels)} fields from the document.", "values": values}
+
     MOOT_QUESTIONS = 5
 
     def moot_turn(self, facts: str, side: str, hearing: str, history: List[Dict], finish: bool = False,
-                  mode: str = DEFAULT_MODE, language: str = DEFAULT_LANGUAGE) -> Dict:
+                  mode: str = DEFAULT_MODE, language: str = DEFAULT_LANGUAGE, suggest: bool = False) -> Dict:
         """One turn of a practice hearing: the judge's next question, or, at the end, feedback on counsel's answers.
         history: [{"role": "judge"|"counsel", "text": ...}], oldest first."""
         failed = {"route": "ERROR", "restated_query": "", "sources": [], "grounded": False}
@@ -3034,7 +3254,7 @@ Output Instructions:
             return {**failed, "answer": "Give the facts of the matter first."}
         turns = [t for t in (history or []) if isinstance(t, dict) and t.get("role") in ("judge", "counsel")][-14:]
         asked = sum(t["role"] == "judge" for t in turns)
-        done = finish or asked >= self.MOOT_QUESTIONS
+        done = (finish or asked >= self.MOOT_QUESTIONS) and not suggest
         try:
             hits = add_context_chunks(search_hybrid(hearing + " " + facts[:600], top_k=6))
         except Exception:
@@ -3043,14 +3263,16 @@ Output Instructions:
                                for t in turns) or "(the hearing has not started: begin it)"
         prompt = MOOT_PROMPT.format(hearing=hearing, side=side, facts=facts, transcript=transcript,
                                     context=format_search_results(hits) if hits else "(no judgments found)",
-                                    task=MOOT_FEEDBACK if done else MOOT_ASK, style=style_instructions(mode, language))
+                                    task=MOOT_SUGGEST if suggest else MOOT_FEEDBACK if done else MOOT_ASK,
+                                    style=style_instructions(mode, language))
         try:
-            with agent_label("judge", "Feedback from the bench" if done else "Judge agent"):
+            with agent_label("judge", "Counsel's suggested reply" if suggest else "Feedback from the bench" if done else "Judge agent"):
                 answer = message_text(self._invoke(prompt))
         except Exception as e:
             return {**failed, "answer": _api_error_message(e)}
         return {"answer": answer, "route": "MOOT", "restated_query": hearing, "sources": source_records(hits),
-                "grounded": bool(hits), "done": done, "question": asked + (0 if done else 1), "of": self.MOOT_QUESTIONS}
+                "grounded": bool(hits), "done": done, "question": asked + (0 if done or suggest else 1), "of": self.MOOT_QUESTIONS,
+                "suggestion": suggest}
 
     CITATOR_TREATMENTS = ("followed", "distinguished", "doubted", "mentioned")
 

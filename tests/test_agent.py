@@ -1020,3 +1020,89 @@ def test_evidence_check_reads_the_papers_whole():
     prompt = agent.llm.calls[-1]
     assert out["route"] == "EVIDENCE" and "Not in the papers" in prompt and "bounced on 5 March 2024" in prompt
     assert prompt.count("dishonoured on 1 March 2024") > 150                    # more than the 6,000 characters a fact gets
+
+
+
+def test_video_evidence_reads_the_frames_then_writes_from_the_judgments():
+    agent = make_agent(thread="video")
+    frames = [{"t": 0, "data": "data:image/jpeg;base64,AAAA"}, {"t": 75, "data": "data:image/jpeg;base64,BBBB"},
+              {"t": 3, "data": "not an image"}]
+    out = agent.video_evidence(frames, "Police took my motorbike outside my shop")
+    read = agent.llm.calls[-2][0].content                                    # the first call: the frames themselves
+    images = [c for c in read if c.get("type") == "image_url"]
+    assert len(images) == 2 and images[0]["image_url"]["url"].endswith("AAAA")   # the bad frame was dropped
+    assert any("Frame at 1:15" in c.get("text", "") for c in read)               # each frame says when it was taken
+    assert "Police took my motorbike" not in read[0]["text"]                     # the reader looks blind
+    assert "Police took my motorbike" in agent.llm.calls[-1]                     # the evidence agent weighs the claim
+    assert "Keep it safe as evidence" in agent.llm.calls[-1]                     # the second call: the analysis
+    assert out["route"] == "VIDEO" and out["answer"].startswith("## What the video shows") and out["sources"]
+    assert out["frames"] == [{"t": 0.0}, {"t": 75.0}]
+    assert agent.video_evidence([], "x")["route"] == "ERROR"
+
+
+
+class VideoLLM(FakeLLM):
+    """The reader sees three things, one of them invented; the checker catches it."""
+    def invoke(self, prompt):
+        self.calls.append(prompt)
+        text = str(prompt[0].content[0]["text"]) if isinstance(prompt, list) else str(prompt)
+        if "still frames from a phone video" in text:
+            return types.SimpleNamespace(content="| Time | What can be seen |\n|---|---|\n| 0:01 | A man parks a red motorbike |\n"
+                                                 "| 0:05 | Two officers take the keys |\n| 0:09 | An officer hits the man |\nOverall: A seizure.")
+        if "Keep it safe as evidence" in text:
+            return types.SimpleNamespace(content="## Does the video match what you said?\nVerdict: Does not show it. "
+                                                 "From 0:01 to 0:09 it shows a motorbike being taken, not a killing.\n## What it may help prove\n...")
+        if "checking a description of a video" in text:
+            return types.SimpleNamespace(content=json.dumps([
+                {"n": 1, "verdict": "seen", "correction": ""},
+                {"n": 2, "verdict": "partly", "correction": "Two officers stand by the motorbike"},
+                {"n": 3, "verdict": "not seen", "correction": "The officers push the motorbike away"}]))
+        return super().invoke(prompt)
+
+
+def test_video_checker_takes_each_row_back_to_its_frame():
+    agent = make_agent(VideoLLM(), thread="video2")
+    frames = [{"t": 1, "data": "data:image/jpeg;base64,A"}, {"t": 5, "data": "data:image/jpeg;base64,B"}, {"t": 9, "data": "data:image/jpeg;base64,C"}]
+    out = agent.video_evidence(frames, "Police took my motorbike")
+    assert [r["verdict"] for r in out["rows"]] == ["seen", "partly", "not seen"]
+    assert out["rows"][2]["text"] == "The officers push the motorbike away"        # the invented blow is gone
+    assert "hits the man" not in out["timeline"] and "hits the man" not in out["answer"]
+    assert "| 0:05 | Two officers stand by the motorbike | Partly |" in out["timeline"]
+    assert "1 confirmed, 2 corrected" in out["timeline"]
+    assert "hits the man" not in str(agent.llm.calls[-1])                         # the evidence agent never saw it
+
+
+
+def test_video_says_when_it_does_not_show_what_was_claimed():
+    agent = make_agent(VideoLLM(), thread="video3")
+    frames = [{"t": 1, "data": "data:image/jpeg;base64,A"}, {"t": 5, "data": "data:image/jpeg;base64,B"}, {"t": 9, "data": "data:image/jpeg;base64,C"}]
+    out = agent.video_evidence(frames, "This video shows my brother being murdered")
+    assert out["match"]["verdict"] == "Does not show it" and "not a killing" in out["match"]["reason"]
+    assert "murdered" not in str(agent.llm.calls[0])                              # the reader never heard the claim
+    assert agent.video_evidence(frames, "")["match"] is None                      # nothing claimed, nothing to compare
+
+
+
+def test_moot_court_can_suggest_counsels_reply():
+    agent = make_agent(thread="moot-s")
+    history = [{"role": "judge", "text": "How is the cheque security rather than repayment?"}]
+    out = agent.moot_turn("Accused under 489-F.", "accused", "a bail application", history, suggest=True)
+    assert out["suggestion"] and not out["done"] and "My lord," in agent.llm.calls[-1]
+    assert "JUDGE: How is the cheque security" in agent.llm.calls[-1]
+
+
+
+class FillLLM(FakeLLM):
+    def invoke(self, prompt):
+        self.calls.append(prompt)
+        return types.SimpleNamespace(content=json.dumps({"Your name": "Muhammad Aslam", "Recipient": "Tariq Mehmood",
+                                                         "Amount": "Rs. 5,000,000", "Days given to pay": ""}))
+
+
+def test_fill_fields_keeps_only_what_the_document_says():
+    agent = make_agent(FillLLM(), thread="fill")
+    doc = "Complainant Muhammad Aslam states that Tariq Mehmood gave him a cheque for Rs. 900,000 which bounced."
+    out = agent.fill_fields(["Your name", "Recipient", "Amount", "Days given to pay"], doc)
+    assert out["values"] == {"Your name": "Muhammad Aslam", "Recipient": "Tariq Mehmood"}   # the invented amount is dropped
+    assert "never invent" in agent.llm.calls[-1]
+    assert agent.fill_fields([], doc)["route"] == "ERROR"

@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wakeel AI: AIEF presentation</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Oswald:wght@500;700&family=Public+Sans:wght@400;600;700&display=swap">
+<style>
+  html, body { margin: 0; height: 100%; background: #1d1f21; overflow: hidden; }
+  #stage { position: absolute; left: 50%; top: 50%; width: 1920px; height: 1080px; transform-origin: center center; }
+  #stage > section { position: absolute; inset: 0; width: 1920px; height: 1080px; box-sizing: border-box; overflow: hidden; display: none; }
+  #stage > section:not(.on) { display: none !important; }
+  #stage h1, #stage h2, #stage h3, #stage p { margin: 0; }
+  #stage section { position: absolute; }
+  i.arrow { display: block; flex: none; clip-path: polygon(0 28%, 60% 28%, 60% 0, 100% 50%, 60% 100%, 60% 72%, 0 72%); }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; display: flex; gap: 12px; align-items: center; justify-content: center; padding: 10px;
+          font: 14px/1 'Public Sans', Arial, sans-serif; color: #cfcac0; background: rgba(0,0,0,.45); }
+  #bar button { background: #f4f0e8; color: #111; border: 0; padding: 8px 14px; font: inherit; cursor: pointer; }
+  #notes { position: fixed; left: 0; right: 0; bottom: 44px; max-height: 40%; overflow: auto; padding: 16px 24px; background: rgba(10,10,10,.9); color: #f4f0e8;
+            font: 16px/1.5 'Public Sans', Arial, sans-serif; display: none; }
+  @media print {
+    html, body { overflow: visible; height: auto; background: #fff; }
+    #bar, #notes { display: none; }
+    #stage { position: static; transform: none !important; width: 1920px; height: auto; }
+    #stage > section, #stage > section:not(.on) { position: relative; display: flex !important; page-break-after: always; break-after: page; }
+    @page { size: 1920px 1080px; margin: 0; }
+  }
+</style></head>
+<body>
+<div id="stage">
+<section id="problem" data-transition="fade" style="background:#F4F0E8;color:#111111;font-family:'Public Sans', Arial, sans-serif;padding:64px;display:flex;flex-direction:row;gap:24px">
+<div style="flex:1.2;display:flex;flex-direction:column;justify-content:space-between;gap:32px;background:#E9E2D4;padding:64px">
+<p style="font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#5F5A52;font-weight:600">AIEF 2026 · Intelligent App Creation</p>
+<div style="display:flex;flex-direction:column;gap:24px">
+<h1 style="font-family:'Oswald', Arial, sans-serif;font-size:170px;font-weight:700;line-height:1;text-transform:uppercase;color:#111111">Wakeel AI</h1>
+<p style="font-size:40px;line-height:1.3;color:#2C2E30;font-weight:400">Legal research on Pakistani case law, where every answer is traced to the paragraph it came from.</p>
+</div>
+<p style="font-size:24px;line-height:1.4;color:#5F5A52">Agha Ali Hassan and Warda Fatima<br>FAST-NUCES Lahore</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;justify-content:space-between;gap:24px;background:#FFFFFF;border:1px solid #DCD4C6;padding:56px">
+<p style="font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#1F3A56;font-weight:700">The problem</p>
+<div style="display:flex;flex-direction:column;gap:10px;border-top:1px solid #DCD4C6;padding-top:22px">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:44px;font-weight:700;line-height:1.1;color:#111111">A growing backlog</h3>
+<p style="font-size:28px;line-height:1.4;color:#2C2E30">2.36 million cases were pending on 31 December 2024, 83% of them in the district courts.<span style="color:#1F3A56"> [1]</span></p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;border-top:1px solid #DCD4C6;padding-top:22px">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:44px;font-weight:700;line-height:1.1;color:#111111">Precedent is found by hand</h3>
+<p style="font-size:28px;line-height:1.4;color:#2C2E30">Law reports (PLD, SCMR, PLJ) are searched page by page or by keyword, and keyword search misses cases worded differently.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;border-top:1px solid #DCD4C6;padding-top:22px">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:44px;font-weight:700;line-height:1.1;color:#111111">Chatbots answer without sources</h3>
+<p style="font-size:28px;line-height:1.4;color:#2C2E30">A general chatbot is not tied to Pakistani judgments and can invent a citation. In law that is worse than no answer.</p>
+</div>
+<p style="font-size:24px;line-height:1.35;color:#5F5A52">[1] Law and Justice Commission of Pakistan, Judicial Statistics, July to December 2024, as reported by Minute Mirror (minutemirror.com.pk).</p>
+</div>
+</section>
+<section id="solution" data-transition="fade" style="background:#F4F0E8;color:#111111;font-family:'Public Sans', Arial, sans-serif;padding:0px 0px 160px;display:flex;flex-direction:column;gap:32px">
+<div style="display:flex;flex-direction:column;gap:12px;background:#5C7174;color:#FFFFFF;padding:56px 128px 48px">
+<p style="font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#E8EEF2;font-weight:600">Proposed solution</p>
+<h2 style="font-family:'Oswald', Arial, sans-serif;font-size:84px;font-weight:700;line-height:1.1;text-transform:uppercase;color:#FFFFFF">Answers you can check</h2>
+</div>
+<div style="margin:0px;padding:0px 128px">
+<p style="font-size:30px;line-height:1.4;color:#111111;background:#E9E2D4;padding:28px 36px;border-left:8px solid #1F3A56">One rule runs through all of it: write only from retrieved judgment paragraphs, link every claim to its source, and say so when the judgments do not answer.</p>
+</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;padding:0px 128px">
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;padding:28px 36px;border:1px solid #DCD4C6;border-top:6px solid #1F3A56">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:44px;font-weight:700;line-height:1.1;color:#111111">Ask in your language</h3>
+<p style="font-size:26px;line-height:1.4;color:#2C2E30">English, Urdu or Roman Urdu, typed or spoken. Each claim links to the paragraph it came from.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;padding:28px 36px;border:1px solid #DCD4C6;border-top:6px solid #1F3A56">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:44px;font-weight:700;line-height:1.1;color:#111111">Explain my document</h3>
+<p style="font-size:26px;line-height:1.4;color:#2C2E30">Upload an FIR, notice or order for a plain-words meaning, ranked red flags and deadlines. It is never stored.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;padding:28px 36px;border:1px solid #DCD4C6;border-top:6px solid #1F3A56">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:44px;font-weight:700;line-height:1.1;color:#111111">Draft and verify</h3>
+<p style="font-size:26px;line-height:1.4;color:#2C2E30">Draft from your facts, then check every section against the official text and every case against the library, with no AI.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:10px;background:#FFFFFF;padding:28px 36px;border:1px solid #DCD4C6;border-top:6px solid #1F3A56">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:44px;font-weight:700;line-height:1.1;color:#111111">A team of agents</h3>
+<p style="font-size:26px;line-height:1.4;color:#2C2E30">An orchestrator picks the agents for the job and shows each one working, from research to a final verifier.</p>
+</div>
+</div>
+<p style="position:absolute;left:128px;bottom:64px;width:1664px;font-size:24px;line-height:1.35;color:#5F5A52">Knowledge base: real Lahore High Court judgments and the statutes they cite, copied word for word from official sources.</p>
+</section>
+<section id="architecture" data-transition="fade" style="background:#F4F0E8;color:#111111;font-family:'Public Sans', Arial, sans-serif;padding:0px 0px 160px;display:flex;flex-direction:column;gap:40px">
+<div style="display:flex;flex-direction:column;gap:12px;background:#5C7174;color:#FFFFFF;padding:56px 128px 48px">
+<p style="font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#E8EEF2;font-weight:600">Architecture</p>
+<h2 style="font-family:'Oswald', Arial, sans-serif;font-size:84px;font-weight:700;line-height:1.1;text-transform:uppercase;color:#FFFFFF">From judgment to verified answer</h2>
+</div>
+<div style="display:grid;grid-template-columns:1fr 44px 1fr 44px 1fr 56px 1fr 44px 1fr 44px 1fr;gap:12px 10px;padding:0px 128px">
+<p style="grid-column:span 5;font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#5F5A52;font-weight:600">Built once</p>
+<p style="font-size:24px"> </p>
+<p style="grid-column:span 5;font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#5F5A52;font-weight:600">For every question</p>
+<div style="display:flex;flex-direction:column;justify-content:center;gap:6px;background:#E9E2D4;padding:22px 18px;text-align:center"><h3 style="font-size:28px;font-weight:700;line-height:1.2;color:#111111;text-align:center">Judgments</h3><p style="font-size:24px;line-height:1.3;color:#4A4640;text-align:center">49 PDFs</p></div>
+<i class="arrow" kind="arrow-right" style="background:#1F3A56;width:40px;height:26px;align-self:center"></i>
+<div style="display:flex;flex-direction:column;justify-content:center;gap:6px;background:#E9E2D4;padding:22px 18px;text-align:center"><h3 style="font-size:28px;font-weight:700;line-height:1.2;color:#111111;text-align:center">Chunker</h3><p style="font-size:24px;line-height:1.3;color:#4A4640;text-align:center">by paragraph</p></div>
+<i class="arrow" kind="arrow-right" style="background:#1F3A56;width:40px;height:26px;align-self:center"></i>
+<div style="display:flex;flex-direction:column;justify-content:center;gap:6px;background:#E9E2D4;padding:22px 18px;text-align:center"><h3 style="font-size:28px;font-weight:700;line-height:1.2;color:#111111;text-align:center">Two indexes</h3><p style="font-size:24px;line-height:1.3;color:#4A4640;text-align:center">meaning and keywords</p></div>
+<i class="arrow" kind="arrow-right" style="background:#1F3A56;width:48px;height:30px;align-self:center"></i>
+<div style="display:flex;flex-direction:column;justify-content:center;gap:6px;background:#DCE6EE;padding:22px 18px;text-align:center"><h3 style="font-size:28px;font-weight:700;line-height:1.2;color:#111111;text-align:center">Search</h3><p style="font-size:24px;line-height:1.3;color:#3C4A57;text-align:center">router picks the path</p></div>
+<i class="arrow" kind="arrow-right" style="background:#1F3A56;width:40px;height:26px;align-self:center"></i>
+<div style="display:flex;flex-direction:column;justify-content:center;gap:6px;background:#DCE6EE;padding:22px 18px;text-align:center"><h3 style="font-size:28px;font-weight:700;line-height:1.2;color:#111111;text-align:center">Model</h3><p style="font-size:24px;line-height:1.3;color:#3C4A57;text-align:center">writes from the passages</p></div>
+<i class="arrow" kind="arrow-right" style="background:#1F3A56;width:40px;height:26px;align-self:center"></i>
+<div style="display:flex;flex-direction:column;justify-content:center;gap:6px;background:#DCE6EE;padding:22px 18px;text-align:center"><h3 style="font-size:28px;font-weight:700;line-height:1.2;color:#111111;text-align:center">Verifier</h3><p style="font-size:24px;line-height:1.3;color:#3C4A57;text-align:center">checks with no AI</p></div>
+</div>
+<div style="display:flex;flex-direction:column;gap:16px;padding:0px 128px">
+<p style="font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#1F3A56;font-weight:700">Why it is built this way</p>
+<div style="display:flex;gap:24px">
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;padding:32px;border:1px solid #DCD4C6;border-top:6px solid #1F3A56">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:40px;font-weight:700;line-height:1.1;color:#111111">Chunk by paragraph</h3>
+<p style="font-size:28px;line-height:1.4;color:#2C2E30">Our first chunker discarded short paragraphs: 151 of 647, holdings included. The fixed chunker keeps all 647.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;padding:32px;border:1px solid #DCD4C6;border-top:6px solid #1F3A56">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:40px;font-weight:700;line-height:1.1;color:#111111">Meaning and keywords</h3>
+<p style="font-size:28px;line-height:1.4;color:#2C2E30">On 5 questions about a named section, meaning-only search found the right judgment 60% of the time; keyword search, 100%.</p>
+</div>
+<div style="flex:1;display:flex;flex-direction:column;gap:12px;background:#FFFFFF;padding:32px;border:1px solid #DCD4C6;border-top:6px solid #1F3A56">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:40px;font-weight:700;line-height:1.1;color:#111111">Verify without AI</h3>
+<p style="font-size:28px;line-height:1.4;color:#2C2E30">Fixed rules check each citation and fact against its source, so the checker cannot be talked into agreeing with the model.</p>
+</div>
+</div>
+</div>
+</section>
+<section id="results" data-transition="fade" style="background:#F4F0E8;color:#111111;font-family:'Public Sans', Arial, sans-serif;padding:0px 0px 64px;display:flex;flex-direction:column;gap:24px">
+<div style="display:flex;flex-direction:column;gap:12px;background:#5C7174;color:#FFFFFF;padding:44px 128px 36px">
+<p style="font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#E8EEF2;font-weight:600">Major features</p>
+<h2 style="font-family:'Oswald', Arial, sans-serif;font-size:76px;font-weight:700;line-height:1.1;text-transform:uppercase;color:#FFFFFF">What Wakeel AI does</h2>
+</div>
+<div style="display:flex;flex-direction:column;gap:12px;padding:0px 128px">
+<p style="font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#5F5A52;font-weight:600">For people</p>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:24px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:22px 26px;border:1px solid #DCD4C6;border-top:6px solid #5C7174">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:34px;font-weight:700;line-height:1.1;color:#111111">Ask in your language</h3>
+<p style="font-size:26px;line-height:1.4;color:#2C2E30">English, Urdu or Roman Urdu, typed or spoken, every claim cited.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:22px 26px;border:1px solid #DCD4C6;border-top:6px solid #5C7174">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:34px;font-weight:700;line-height:1.1;color:#111111">Explain my document</h3>
+<p style="font-size:26px;line-height:1.4;color:#2C2E30">An FIR or notice in plain words, with red flags and deadlines.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:22px 26px;border:1px solid #DCD4C6;border-top:6px solid #5C7174">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:34px;font-weight:700;line-height:1.1;color:#111111">Rights right now</h3>
+<p style="font-size:26px;line-height:1.4;color:#2C2E30">Rights on arrest in the law’s own words, with free helplines.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:22px 26px;border:1px solid #DCD4C6;border-top:6px solid #5C7174">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:34px;font-weight:700;line-height:1.1;color:#111111">Share as a video</h3>
+<p style="font-size:26px;line-height:1.4;color:#2C2E30">A short captioned video to share on WhatsApp, in Urdu or English.</p>
+</div>
+</div>
+</div>
+<div style="display:flex;flex-direction:column;gap:12px;padding:0px 128px">
+<p style="font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#1F3A56;font-weight:700">For lawyers</p>
+<div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:24px">
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:22px 26px;border:1px solid #DCD4C6;border-top:6px solid #1F3A56">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:34px;font-weight:700;line-height:1.1;color:#111111">Agent room</h3>
+<p style="font-size:26px;line-height:1.4;color:#2C2E30">An orchestrator runs research, statute, drafting and verifier agents.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:22px 26px;border:1px solid #DCD4C6;border-top:6px solid #1F3A56">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:34px;font-weight:700;line-height:1.1;color:#111111">Workspace</h3>
+<p style="font-size:26px;line-height:1.4;color:#2C2E30">A matter’s facts, papers, workflows and history in one place.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:22px 26px;border:1px solid #DCD4C6;border-top:6px solid #1F3A56">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:34px;font-weight:700;line-height:1.1;color:#111111">Verify</h3>
+<p style="font-size:26px;line-height:1.4;color:#2C2E30">Check a draft’s citations and facts, and how a case has been treated.</p>
+</div>
+<div style="display:flex;flex-direction:column;gap:8px;background:#FFFFFF;padding:22px 26px;border:1px solid #DCD4C6;border-top:6px solid #1F3A56">
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:34px;font-weight:700;line-height:1.1;color:#111111">Courtroom</h3>
+<p style="font-size:26px;line-height:1.4;color:#2C2E30">Practise a hearing: a judge asks, you answer, and it scores you.</p>
+</div>
+</div>
+</div>
+<div style="padding:0px 128px">
+<div style="display:flex;gap:40px;align-items:center;background:#DCE6EE;padding:28px 36px;margin:0px;border-left:8px solid #1F3A56">
+<div style="width:420px;display:flex;flex-direction:column;gap:8px">
+<p style="font-size:24px;letter-spacing:3px;text-transform:uppercase;color:#1F3A56;font-weight:700">Verify a video</p>
+<h3 style="font-family:'Oswald', Arial, sans-serif;font-size:40px;font-weight:700;line-height:1.1;color:#111111">Does it show what is claimed?</h3>
+</div>
+<div style="flex:1;display:grid;grid-template-columns:1fr 1fr;gap:12px 32px">
+<p style="font-size:26px;line-height:1.35;color:#1E2A35">• Reads a phone video into a timeline</p>
+<p style="font-size:26px;line-height:1.35;color:#1E2A35">• Checks each moment back to its frame</p>
+<p style="font-size:26px;line-height:1.35;color:#1E2A35">• Never sees the claim, so cannot be led</p>
+<p style="font-size:26px;line-height:1.35;color:#1E2A35">• Sends still frames, never the video file</p>
+</div>
+</div>
+</div>
+</section>
+</div>
+<div id="notes"></div>
+<div id="bar"><button id="prev">Previous</button><span id="count"></span><button id="next">Next</button><button id="nb">Speaker notes</button><span>Arrow keys to move, N for notes, print to save as PDF</span></div>
+<script>
+  const NOTES = ["Open with the problem. About 2.36 million cases were pending at the end of 2024, and most of them sit in the district courts. Finding precedent is slow because law reports are searched by hand or by keyword. And a general chatbot answers fluently but is not tied to Pakistani judgments, so it can invent a case or a section number. In law an invented citation is worse than no answer. The 2.36 million figure is from the Law and Justice Commission of Pakistan's statistics for July to December 2024, as reported by Minute Mirror.", "The design rule is the whole product: write only from retrieved judgment paragraphs, link every claim to its source, and say so when the judgments do not answer. Four things build on it. Ask answers questions in English, Urdu or Roman Urdu. Explain my document turns an FIR or notice into plain words with red flags and deadlines. Draft and verify writes a draft from your facts and then checks every section and case citation with fixed rules, not AI. And a team of agents shows an orchestrator choosing and running the right specialists.", "The left half happens once. Judgments are split on their numbered paragraphs instead of being cut at a fixed length, and every chunk carries its case citations and statute sections. They go into two indexes, one for meaning and one for keywords. The right half runs for every question: a router picks the path and hybrid search finds the passages, the language model writes only from those passages, and a verifier with no AI checks each citation and fact against its source paragraph. The three cards give the reason for each choice, with our own measurements. The 60 versus 100 percent comparison is only five questions, so say that it is small. The model is OpenAI, with Gemini as a fallback.", "Close on what the product does. For people: ask in English, Urdu or Roman Urdu and get a cited answer; upload an FIR or notice and get it in plain words with red flags and deadlines; see your rights on arrest in the law\u2019s own words with free helplines; and turn any answer into a short video to share on WhatsApp. For lawyers: the agent room, where an orchestrator runs a team of specialist agents; the workspace for a whole matter; Verify, which checks a draft\u2019s citations and facts and how a case has been treated; and the courtroom, where you practise a hearing and get scored. In Verify you can also check a video. It reads a phone video into a timeline, checks each moment back to its frame, and gives a plain verdict on whether the video shows what is claimed: it matches, does not show it, or contradicts it. The reader never sees the claim, so it cannot be talked into seeing it, and only still frames taken in your browser are sent; the video file itself is never uploaded. Everything is built on the same cited, checked answers."];
+  const slides = [...document.querySelectorAll('#stage > section')];
+  const stage = document.getElementById('stage');
+  let i = Math.max(0, Math.min(slides.length - 1, (parseInt(location.hash.slice(1), 10) || 1) - 1));
+  function fit() { const s = Math.min(innerWidth / 1920, (innerHeight - 44) / 1080); stage.style.transform = 'translate(-50%, -50%) scale(' + s + ')'; stage.style.top = 'calc(50% - 22px)'; }
+  function show(n) {
+    i = Math.max(0, Math.min(slides.length - 1, n));
+    slides.forEach((s, k) => s.classList.toggle('on', k === i));
+    document.getElementById('count').textContent = (i + 1) + ' / ' + slides.length;
+    document.getElementById('notes').textContent = NOTES[i] || '';
+    history.replaceState(null, '', '#' + (i + 1));
+  }
+  document.getElementById('prev').onclick = () => show(i - 1);
+  document.getElementById('next').onclick = () => show(i + 1);
+  document.getElementById('nb').onclick = () => { const n = document.getElementById('notes'); n.style.display = n.style.display === 'block' ? 'none' : 'block'; };
+  addEventListener('keydown', e => {
+    if (['ArrowRight', 'PageDown', ' '].includes(e.key)) { e.preventDefault(); show(i + 1); }
+    else if (['ArrowLeft', 'PageUp'].includes(e.key)) { e.preventDefault(); show(i - 1); }
+    else if (e.key === 'n' || e.key === 'N') document.getElementById('nb').click();
+    else if (e.key === 'Home') show(0); else if (e.key === 'End') show(slides.length - 1);
+  });
+  addEventListener('resize', fit); fit(); show(i);
+</script>
+</body></html>
